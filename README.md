@@ -1,3 +1,41 @@
+# PhotoCraft 0.20.2 DW 1 — JPEG XL and Batch Converter
+
+**Unofficial community fork by Dariusz Wiśniewski (@dariuszby-arch).**
+Built on upstream PhotoCraft **v0.20.2**. PhotoCraft remains the work of its
+original authors and contributors; these are additional community features.
+
+- **JPEG XL:** read/write, lossless or lossy compression, quality and effort
+  settings, progressive encoding, and EXIF/XMP preservation.
+- **Batch Converter:** add individual files, multiple files or folders; filter
+  names and extensions, include subfolders, select files with checkboxes, choose
+  one output format for the whole queue, set an output folder, and track progress.
+  Supports cancellation and continues after an invalid input file.
+- **Metadata:** tested JPG → JXL → JPG with **Metadata: All**, including metadata
+  placed after the image in a JXL container. Leave **Remove location info** off
+  when location data should be retained. **Metadata: None** strips EXIF/XMP.
+- **Extended export:** resizing, output-size limits, sharpening, watermark,
+  colour/profile settings, presets and filename templates.
+
+Open **File → Export → Batch Converter…** in the desktop app.
+The queue defaults to JXL, quality 85 and Metadata: All. Enable **Lossless** for
+lossless compression. Source files are protected from being overwritten.
+
+[Instrukcja po polsku](DW_README_PL.md) ·
+[Batch Converter guide](BATCH_CONVERTER_PL.md) ·
+[Verification report](RAPORT_PhotoCraft_0.20.2_DW_AppImage.md) ·
+[Release notes](DW_RELEASE_NOTES_0.20.2.md)
+
+The Linux x86_64 AppImage has been built and launched in Linux/X11, with
+independent JPEG XL and metadata checks. It targets MX Linux 23 / glibc 2.36+;
+it has not yet been tested on the user's physical MX Linux machine. Full upstream
+CI has not been completed. A Windows binary is not confirmed by this report.
+**The 0.20.2 binary upload to GitHub Releases is pending; the older 0.17.2 release
+is a different build.** The complete 0.20.2 source and report are available here.
+
+---
+
+## Upstream PhotoCraft documentation
+
 <p align="center">
   <a href="https://getartcraft.com/">
     <picture>
