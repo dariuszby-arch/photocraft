@@ -51,6 +51,11 @@ Repozytorium: <https://github.com/dariuszby-arch/photocraft>.
 Pracuj z gałęzią integracji pełnej wersji 0.20.2, a nie ze starszą, częściową
 gałęzią EXIF/XMP. Wymagany Rust **1.95+** i zależności z `Cargo.lock`.
 
+Profil `dw-release` zachowuje zoptymalizowane przetwarzanie obrazów i ogranicza
+zużycie pamięci kompilatora w dużych modułach interfejsu oraz poleceń. Można go
+wybrać zamiast `--release`, podając `--profile dw-release`; wtedy wyniki trafiają
+do katalogu `dw-release`, a nie `release`.
+
 Linux:
 
 ```sh

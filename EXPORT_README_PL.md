@@ -55,7 +55,7 @@ Przy konwersjach JPG → JXL i JXL → JPG wybierz **Metadata: All**.
 Dla zachowania również danych lokalizacji wyłącz **Remove location info**.
 Poprawiono odczyt metadanych umieszczonych po obrazie w kontenerze JXL.
 Bieżące wyniki weryfikacji gotowej paczki znajdują się w `RAPORT_TESTOW_DW.md`.
-`RAPORT_TESTOW_DW.md` zawiera archiwalny raport wersji 0.17.1.
+Zakres wykonanej weryfikacji opisano w raporcie dołączonym do paczki.
 
 ## Konwersja wielu zdjęć
 

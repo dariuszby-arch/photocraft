@@ -112,6 +112,22 @@ opt-level = 0
 lto = "thin"
 codegen-units = 1
 
+# Portable DW builds on machines with limited RAM. Image processing keeps release
+# optimization; splitting the large UI/command crates limits peak compiler memory.
+[profile.dw-release]
+inherits = "release"
+lto = false
+codegen-units = 64
+strip = "debuginfo"
+
+[profile.dw-release.package.photocraft-ui-egui]
+opt-level = 1
+codegen-units = 256
+
+[profile.dw-release.package.photocraft-engine]
+opt-level = 1
+codegen-units = 256
+
 # The browser build (apps/photocraft-web, `data-cargo-profile` in its index.html). Hosts cap the
 # size of a single file (Cloudflare Pages/Workers: 25 MiB), and the wasm is downloaded on every
 # visit, so this profile optimizes for size: fat LTO, opt-level "z" for PhotoCraft's own crates,

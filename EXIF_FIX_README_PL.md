@@ -1,13 +1,12 @@
-# PhotoCraft — zachowanie EXIF i XMP
+# PhotoCraft 0.20.2 DW — EXIF i XMP
 
-Poprawiono odczyt EXIF/XMP znajdujących się za ostatnią klatką kontenera JXL.
-Regresje obejmują ten przypadek oraz konwersje JPG → JXL → JPG w trybie
-bezstratnym i stratnym. Panel eksportu sprawdza ustawienie Metadata: All
-przy zapisie JPG i JXL.
+Przeniesiono poprawkę odczytu metadanych umieszczonych również za ostatnią
+klatką kontenera JXL. Eksport korzysta z bieżącego mechanizmu PhotoCraft 0.20.2.
 
-Dla zachowania całych metadanych wybierz File → Export → Export As,
-Metadata: All i wyłącz Remove location info. Opcja Remove location info
-usuwa dane lokalizacji także wtedy, gdy wybrano All.
+Przy konwersji JPG → JXL → JPG wybierz **Metadata: All**. Jeśli chcesz zachować
+również lokalizację, wyłącz **Remove location info**. Opcje redakcji metadanych
+działają celowo; program nie odtwarza danych, których nie było w źródle.
 
-Bieżący raport wersji 0.17.2: RAPORT_TESTOW_DW.md.
-RAPORT_TESTOW_DW.md zawiera archiwalny raport poprawki 0.17.1.
+Przeniesione testy obejmują oba kierunki konwersji, tryb stratny i bezstratny,
+metadane za obrazem i wyłączenie eksportu metadanych. Wykonanie i wyniki dla
+konkretnej kompilacji opisuje raport dołączony do paczki.
