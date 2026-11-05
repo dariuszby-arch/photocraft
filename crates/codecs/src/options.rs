@@ -1,5 +1,6 @@
 //! Decode limits and encode options.
 
+use crate::JxlOptions;
 use crate::error::CodecError;
 use crate::image::{ChannelLayout, SampleType};
 
@@ -32,6 +33,15 @@ impl Default for Limits {
 }
 
 impl Limits {
+    /// For a decoder that writes a band of rows at a time into the document's tiles instead of
+    /// one buffer (TIFF, #8169): the largest document size, 300,000 px a side, on 64-bit
+    /// targets, with `max_alloc` bounding each group of bands. 32-bit targets keep the
+    /// [`Default`] limits: wasm32's 4 GiB address space can't hold a larger document anyway.
+    pub fn banded() -> Self {
+        let l = Limits::default();
+        if cfg!(target_pointer_width = "64") { Limits { max_width: 300_000, max_height: 300_000, max_pixels: 300_000 * 300_000, ..l } } else { l }
+    }
+
     /// Effectively unlimited (still bounded by `usize` overflow checks).
     pub fn none() -> Self {
         Limits { max_width: u32::MAX, max_height: u32::MAX, max_pixels: u64::MAX, max_alloc: u64::MAX }
@@ -44,6 +54,20 @@ impl Limits {
     }
 
     pub(crate) fn check_bytes(&self, width: u32, height: u32, bytes_per_pixel: u64) -> Result<(), CodecError> {
+        self.check_size(width, height)?;
+        let bytes = (width as u64 * height as u64).saturating_mul(bytes_per_pixel);
+        if bytes > self.max_alloc {
+            return Err(CodecError::LimitExceeded(format!("{bytes} bytes exceed max_alloc {}", self.max_alloc)));
+        }
+        if usize::try_from(bytes).is_err() {
+            return Err(CodecError::LimitExceeded(format!("{bytes} bytes do not fit in memory")));
+        }
+        Ok(())
+    }
+
+    /// The dimension and pixel-count checks of [`Limits::check`], for a decoder that never holds
+    /// the whole image in one buffer (`max_alloc` then bounds each piece it decodes).
+    pub(crate) fn check_size(&self, width: u32, height: u32) -> Result<(), CodecError> {
         if width == 0 || height == 0 {
             return Err(CodecError::InvalidImage(format!("zero-sized image {width}x{height}")));
         }
@@ -53,13 +77,6 @@ impl Limits {
         let pixels = width as u64 * height as u64;
         if pixels > self.max_pixels {
             return Err(CodecError::LimitExceeded(format!("{pixels} pixels exceed max {}", self.max_pixels)));
-        }
-        let bytes = pixels.saturating_mul(bytes_per_pixel);
-        if bytes > self.max_alloc {
-            return Err(CodecError::LimitExceeded(format!("{bytes} bytes exceed max_alloc {}", self.max_alloc)));
-        }
-        if usize::try_from(bytes).is_err() {
-            return Err(CodecError::LimitExceeded(format!("{bytes} bytes do not fit in memory")));
         }
         Ok(())
     }
@@ -270,9 +287,15 @@ pub struct DdsOptions {
     pub mipmaps: bool,
 }
 
+/// The longer side, in pixels, at which a TIFF image pyramid stops: the last level written is
+/// the first one no longer than this ([`EncodeOptions::tiff_pyramid`]).
+pub const TIFF_PYRAMID_MIN: u32 = 64;
+
 /// Options for [`crate::encode`].
 #[derive(Debug, Clone)]
 pub struct EncodeOptions {
+    /// JPEG XL compression, ported from LightCraft. Lossless by default.
+    pub jxl: JxlOptions,
     /// JPEG quality 1..=100 (also AVIF quality when enabled).
     pub jpeg_quality: u8,
     /// JPEG 4:2:0 chroma subsampling (`false` = 4:4:4).
@@ -294,6 +317,11 @@ pub struct EncodeOptions {
     /// Always write TIFF as BigTIFF (8-byte offsets). Without it a TIFF is written as BigTIFF
     /// only when it could pass the 4 GiB a classic TIFF can address.
     pub tiff_bigtiff: bool,
+    /// TIFF: after the full image, write Photoshop's "Save Image Pyramid" levels: copies at half,
+    /// a quarter, … of the size, each marked reduced-resolution (`NewSubfileType` 1), down to
+    /// [`crate::TIFF_PYRAMID_MIN`] px on the longer side. Readers that don't know pyramids open
+    /// the full image, which comes first.
+    pub tiff_pyramid: bool,
     pub exr_compression: ExrCompression,
     /// DPX bits per sample. `None` follows the image: 8 for 8-bit, 16 otherwise.
     pub dpx_bits: Option<DpxBits>,
@@ -308,6 +336,7 @@ pub struct EncodeOptions {
 impl Default for EncodeOptions {
     fn default() -> Self {
         EncodeOptions {
+            jxl: JxlOptions::default(),
             jpeg_quality: 90,
             jpeg_chroma_subsampling: true,
             jpeg_format: JpegFormat::Baseline,
@@ -318,6 +347,7 @@ impl Default for EncodeOptions {
             webp_quality: 80,
             tiff_compression: TiffCompression::None,
             tiff_bigtiff: false,
+            tiff_pyramid: false,
             exr_compression: ExrCompression::Zip16,
             dpx_bits: None,
             dds: DdsOptions::default(),

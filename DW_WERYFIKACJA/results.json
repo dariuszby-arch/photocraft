@@ -1,0 +1,120 @@
+{
+  "version": "0.20.2 DW 1",
+  "source_commit": "875520400b34651d2fbd0042b577fe192764b768",
+  "source_tree": "9fedb63a66c5c57452681a3fab85fb85eea38e60",
+  "appimage_sha256": "fe804c51cca063cddaf308bd50be32dda63e04852271d66e8b00138d3e6e457c",
+  "queue": {
+    "bad_input_continued": true,
+    "cancellation": true,
+    "folder_filters_recursion_deduplication": true,
+    "jpeg": "źródło.jpg",
+    "jxl": "źródło.jxl",
+    "metadata_none_strips_exif_xmp": true,
+    "original_unchanged": true,
+    "overwrite_cannot_replace_inputs": true,
+    "passed": true,
+    "unchecked_omitted": true,
+    "metadata_all_11_fields_both_directions": true
+  },
+  "metadata": {
+    "fixture_metadata": {
+      "Make": "BatchCam",
+      "Model": "MetadataFixture",
+      "Orientation": 1,
+      "ModifyDate": "2026:11:05 12:00:00",
+      "Artist": "DW Test Author",
+      "Copyright": "DW Test Copyright",
+      "DateTimeOriginal": "2026:11:04 10:20:30",
+      "ISO": 200,
+      "LensModel": "TestLens 35mm",
+      "Creator": "DW Test Author",
+      "Rights": "DW Test Copyright"
+    },
+    "cases": [
+      {
+        "mode": "lossless",
+        "layout": "normal",
+        "metadata_fields": 11,
+        "passed": true
+      },
+      {
+        "mode": "lossless",
+        "layout": "trailing",
+        "metadata_fields": 11,
+        "passed": true
+      },
+      {
+        "mode": "lossy",
+        "layout": "normal",
+        "metadata_fields": 11,
+        "passed": true
+      },
+      {
+        "mode": "lossy",
+        "layout": "trailing",
+        "metadata_fields": 11,
+        "passed": true
+      }
+    ]
+  },
+  "oracles": [
+    {
+      "mode": "lossless",
+      "jxl_bytes": 2888,
+      "independent_libjxl_decode": "passed",
+      "mean_absolute_pixel_error": 0.0,
+      "jxl_metadata": {
+        "Make": "DW TestCam",
+        "Creator": "DW Test Author"
+      },
+      "jpeg_roundtrip_metadata": {
+        "Make": "DW TestCam",
+        "Creator": "DW Test Author"
+      }
+    },
+    {
+      "mode": "lossy",
+      "jxl_bytes": 634,
+      "independent_libjxl_decode": "passed",
+      "mean_absolute_pixel_error": 4.579861111111111,
+      "jxl_metadata": {
+        "Make": "DW TestCam",
+        "Creator": "DW Test Author"
+      },
+      "jpeg_roundtrip_metadata": {
+        "Make": "DW TestCam",
+        "Creator": "DW Test Author"
+      }
+    },
+    {
+      "binary": "photocraft",
+      "maximum_glibc_symbol": "2.35",
+      "version": "photocraft 0.20.2 (dev build)"
+    },
+    {
+      "binary": "photocraft-cli",
+      "maximum_glibc_symbol": "2.35",
+      "version": "photocraft-cli 0.20.2 (dev build)"
+    }
+  ],
+  "performance": {
+    "image": "6000x4000 RGB JPEG",
+    "mode": "lossy JXL quality 75",
+    "exit_code": 0,
+    "seconds": 12.753,
+    "peak_rss_kib": 820696,
+    "source_bytes": 775564,
+    "output_bytes": 3973,
+    "original_unchanged": true
+  },
+  "native_gui_launch": {
+    "passed": true,
+    "exit_code": 0
+  },
+  "visual_review": [
+    "1366x768",
+    "1024x640"
+  ],
+  "physical_mx_linux_tested": false,
+  "full_upstream_ci_completed": false
+}

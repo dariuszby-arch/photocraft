@@ -2,12 +2,17 @@
 //! with a preview and an estimated file size. The estimate encodes a small proxy and scales by
 //! pixel count, so the dialog stays instant on 36 MP documents.
 
+mod advanced;
+pub mod batch;
+mod linear_dng;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Mutex;
 
 use photocraft_cms::Profile;
-use photocraft_doc::{ColorMode, Document};
+#[cfg(test)]
+use photocraft_doc::ColorMode;
+use photocraft_doc::Document;
 use serde_json::{Map, Value, json};
 
 use photocraft_engine::export_preset_cmds::{DEFAULT_RESAMPLE, RESAMPLE, export_resample};
@@ -16,7 +21,21 @@ use crate::state::DialogKind;
 use crate::theme::Tokens;
 use crate::{ExportSettings, PhotocraftApp};
 
-const FORMATS: [(&str, &str); 7] = [("png", "PNG"), ("jpg", "JPG"), ("webp", "WebP"), ("tif", "TIFF"), ("tga", "TGA"), ("ico", "ICO"), ("jxl", "JPEG XL")];
+const FORMATS: [(&str, &str); 13] = [
+    ("jpg", "JPEG"),
+    ("png", "PNG"),
+    ("tif", "TIFF"),
+    ("psd", "PSD"),
+    ("webp", "WebP"),
+    ("avif", "AVIF"),
+    ("jxl", "JPEG XL"),
+    ("dng", "DNG"),
+    ("exr", "OpenEXR"),
+    ("hdr", "HDR"),
+    ("tga", "TGA"),
+    ("ico", "ICO"),
+    ("original", "Original file"),
+];
 
 /// Preferences ▸ remembered dialog settings: Export As writes the settings it was used with
 /// last under its command id and seeds the next dialog from them, as Fill, Liquify and the
@@ -43,7 +62,7 @@ const SETTINGS: [&str; 14] = [
 ];
 
 fn settings_of(f: &Map<String, Value>) -> Map<String, Value> {
-    SETTINGS.iter().filter_map(|k| f.get(*k).map(|v| ((*k).to_string(), v.clone()))).collect()
+    SETTINGS.iter().map(|k| k.to_string()).chain(advanced::keys()).filter_map(|k| f.get(&k).map(|v| (k, v.clone()))).collect()
 }
 
 /// Whether `v` is a value the dialog's `key` control can hold: what a remembered setting is
@@ -58,11 +77,11 @@ fn valid_setting(key: &str, v: &Value) -> bool {
         "width" | "height" => num(1.0, MAX_PX),
         "lossless" | "transparency" | "lockAspect" | "embedProfile" => v.is_boolean(),
         "resample" => v.as_str().is_some_and(|s| export_resample(s).is_ok()),
-        "metadata" => one_of(&["none", "exif", "all"]),
+        "metadata" => one_of(&["none", "exif", "all", "noCamera", "copyright"]),
         "tgaBits" => one_of(&["auto", "24", "32"]),
         "sizing" => one_of(&["scale", "pixels"]),
-        "profile" => one_of(&["document", "srgb"]),
-        _ => false,
+        "profile" => one_of(&["document", "srgb", "p3", "adobergb", "prophoto", "rec2020"]),
+        _ => advanced::valid(key, v),
     }
 }
 
@@ -70,15 +89,21 @@ fn valid_setting(key: &str, v: &Value) -> bool {
 /// no longer matches a control (a hand-edited preferences file) is left at its default.
 fn seed_remembered(app: &PhotocraftApp, f: &mut Map<String, Value>) {
     let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(COMMAND) else { return };
-    for key in SETTINGS {
-        let Some(v) = saved.get(key).filter(|v| valid_setting(key, v)) else { continue };
+    if !saved.contains_key("fullSize") && (saved.contains_key("scale") || saved.contains_key("sizing")) {
+        f.insert("fullSize".into(), json!(false));
+        f.insert("resizeMode".into(), json!("custom"));
+        f.insert("dontEnlarge".into(), json!(false));
+    }
+    for key in SETTINGS.iter().map(|k| k.to_string()).chain(advanced::keys()) {
+        let Some(v) = saved.get(&key).filter(|v| valid_setting(&key, v)) else { continue };
         // Numbers as the dialog's fields hold them; pixel sizes are whole pixels.
-        let v = match (key, v.as_f64()) {
+        let v = match (key.as_str(), v.as_f64()) {
             ("width" | "height", Some(x)) => json!(x.round()),
+            ("limitKb", Some(x)) => json!(x.round() as u64),
             (_, Some(x)) => json!(x),
             _ => v.clone(),
         };
-        f.insert(key.into(), v);
+        f.insert(key, v);
     }
 }
 
@@ -118,6 +143,8 @@ fn open_sized(app: &mut PhotocraftApp, src_w: u32, src_h: u32) -> Result<u64, St
     f.insert("height".into(), json!(src_h));
     f.insert("__w".into(), json!(src_w));
     f.insert("__h".into(), json!(src_h));
+    let st = app.session.active().ok_or("no document")?;
+    advanced::defaults(&mut f, &st.doc, st.path.as_deref());
     seed_remembered(app, &mut f);
     fit_size(&mut f, f64::from(src_w), f64::from(src_h));
     Ok(app.ui.open_dialog(DialogKind::Command, f))
@@ -315,15 +342,15 @@ fn nearest(f: &Map<String, Value>) -> bool {
 /// flattened over white when transparency is off or the format has no alpha.
 fn export_document(doc: &Document, f: &Map<String, Value>, max_side: Option<u32>, source_profile: &Profile) -> Result<Document, String> {
     let resample = resample_method(f, max_side)?;
-    let srgb = s(f, "profile") == "srgb";
+    let converting_profile = !matches!(s(f, "profile").as_str(), "" | "document");
     let mut copy = doc.clone();
-    if srgb {
+    if converting_profile {
         copy.icc_profile = Some(source_profile.to_bytes());
     }
     let mut session = photocraft_engine::Session::new();
     session.add_document(copy, None);
-    if srgb && (doc.mode != ColorMode::Rgb || !source_profile.same_bytes(photocraft_cms::Builtin::Srgb.profile())) {
-        session.execute("edit.convertToProfile", json!({"profile": "srgb", "intent": "perceptual"})).map_err(|e| e.to_string())?;
+    if !advanced::read(f)?.hdr && s_fmt(f) != "dng" && s(f, "profile") != "document" && !s(f, "profile").is_empty() {
+        session.execute("edit.convertToProfile", json!({"profile": s(f,"profile"), "intent": "perceptual"})).map_err(|e| e.to_string())?;
     }
     let (w, h) = export_pixels(f64::from(doc.size.width), f64::from(doc.size.height), f, max_side)?;
     if s_fmt(f) == "ico" && (w > 256.0 || h > 256.0) && max_side.is_none() {
@@ -336,7 +363,15 @@ fn export_document(doc: &Document, f: &Map<String, Value>, max_side: Option<u32>
     if !f.get("transparency").and_then(Value::as_bool).unwrap_or(true) || fmt == "jpg" {
         session.execute("layer.flattenImage", json!({})).map_err(|e| e.to_string())?;
     }
-    session.active().map(|d| (*d.doc).clone()).ok_or_else(|| "export failed".into())
+    let prepared = session.active().map(|d| (*d.doc).clone()).ok_or("export failed")?;
+    let mut a = advanced::read(f)?;
+    if max_side.is_some() {
+        a.resolution = 0.0;
+    }
+    let scale = max_side.map_or(1.0, |_| w / f64::from(doc.size.width).max(1.0));
+    let policy = s(f, "metadata");
+    let prepared = photocraft_engine::export_panel::finish_document(&prepared, &a, if policy.is_empty() { "exif" } else { &policy }, scale)?;
+    if a.hdr { photocraft_engine::export_panel::hdr_document(&prepared, &s_fmt(f)) } else { Ok(prepared) }
 }
 
 /// The exported pixel size: each side scaled and rounded on its own, never below 1 px. The
@@ -397,30 +432,46 @@ pub(crate) fn resize_from_side(src_w: f64, src_h: f64, width: f64, height: f64, 
 /// scale does, and a preview limit shrinks the long side before rounding (the same reduction the
 /// scale path used before pixel fields existed).
 fn export_pixels(src_w: f64, src_h: f64, f: &Map<String, Value>, max_side: Option<u32>) -> Result<(f64, f64), String> {
+    let a = advanced::read(f)?;
+    let Some((mut w, mut h)) = a.dimensions(src_w, src_h)? else {
+        return export_pixels_legacy(src_w, src_h, f, max_side);
+    };
+    let mut scale = 1.0f64;
+    if a.dont_enlarge && f.contains_key("resizeMode") {
+        scale = scale.min((src_w / w).min(src_h / h));
+    }
+    if let Some(side) = max_side {
+        scale = scale.min(f64::from(side) / w.max(h));
+    }
+    w = (w * scale).round().max(1.0);
+    h = (h * scale).round().max(1.0);
+    Ok((w, h))
+}
+
+fn export_pixels_legacy(src_w: f64, src_h: f64, f: &Map<String, Value>, max_side: Option<u32>) -> Result<(f64, f64), String> {
     // Exact pixels apply only in pixel mode. Scale mode keeps the percent, so each layer in a
     // multi-layer export is scaled from its own size rather than forced to the preview's pixels.
     let explicit = if s(f, "sizing") == "pixels" { f.get("width").and_then(Value::as_f64).zip(f.get("height").and_then(Value::as_f64)) } else { None };
     let (mut w, mut h) = if let Some((w, h)) = explicit {
         (finite_px(w)?, finite_px(h)?)
     } else {
-        let mut scale = n(f, "scale", 100.0) / 100.0;
+        let scale = n(f, "scale", 100.0) / 100.0;
         if !scale.is_finite() || scale <= 0.0 {
             return Err("export scale must be a positive number".into());
         }
-        if let Some(m) = max_side {
-            let long = src_w.max(src_h) * scale;
-            if long > f64::from(m) {
-                scale *= f64::from(m) / long;
-            }
-        }
-        return Ok(scaled_size(src_w, src_h, scale));
+        (src_w * scale, src_h * scale)
     };
-    if let Some(m) = max_side {
-        let long = w.max(h);
-        if long > f64::from(m) && long > 0.0 {
-            (w, h) = scaled_size(w, h, f64::from(m) / long);
-        }
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return Err("Invalid export dimensions".into());
     }
+    let mut reduction = 1.0f64;
+    if f.contains_key("resizeMode") && f.get("dontEnlarge").and_then(Value::as_bool) == Some(true) {
+        reduction = reduction.min((src_w / w).min(src_h / h));
+    }
+    if let Some(m) = max_side {
+        reduction = reduction.min(f64::from(m) / w.max(h));
+    }
+    (w, h) = scaled_size(w, h, reduction);
     Ok((w, h))
 }
 
@@ -431,6 +482,10 @@ fn set_format_defaults(f: &mut Map<String, Value>, fmt: &str, prefs: &photocraft
     match fmt {
         "jpg" => {
             f.insert("quality".into(), json!(prefs.jpeg_quality));
+        }
+        "jxl" => {
+            f.insert("quality".into(), json!(90));
+            f.insert("lossless".into(), json!(true));
         }
         "webp" => {
             f.insert("quality".into(), json!(prefs.webp_quality));
@@ -460,15 +515,22 @@ fn settings(f: &Map<String, Value>) -> ExportSettings {
     let quality = n(f, "quality", 85.0).clamp(1.0, 100.0) as u8;
     let metadata = s(f, "metadata");
     ExportSettings {
-        jpeg_quality: (fmt == "jpg").then_some(quality),
+        jxl: photocraft_codecs::JxlOptions {
+            lossless: fmt != "jxl" || lossless(f),
+            quality,
+            hdr: f.get("hdr").and_then(Value::as_bool).unwrap_or(false),
+            effort: if s(f, "jxlEffort") == "fast" { photocraft_codecs::JxlEffort::Fast } else { photocraft_codecs::JxlEffort::Normal },
+            progressive: f.get("jxlProgressive").and_then(Value::as_bool).unwrap_or(false),
+        },
+        jpeg_quality: (fmt == "jpg" || fmt == "avif").then_some(quality),
         webp_lossless: fmt != "webp" || lossless(f),
         webp_quality: (fmt == "webp" && !lossless(f)).then_some(quality),
-        xmp_all: metadata == "all",
+        xmp_all: matches!(metadata.as_str(), "all" | "noCamera" | "copyright"),
         tga_bits: if fmt == "tga" { tga_bits(f) } else { None },
         embed_icc: f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true),
-        // Metadata: None drops EXIF and resolution as well as XMP. A missing key keeps them,
-        // which is what Export As wrote before the choice existed.
-        embed_metadata: metadata != "none",
+        // Metadata was filtered on the export copy. An explicit print resolution is retained
+        // even with Metadata: None; old actions without a resolution keep their old behavior.
+        embed_metadata: metadata != "none" || n(f, "resolution", 0.0) > 0.0,
         ..Default::default()
     }
 }
@@ -626,7 +688,11 @@ fn exact_estimate(doc: &Document, f: &Map<String, Value>, source_profile: &Profi
         return None;
     }
     let full = export_document(doc, f, None, source_profile).ok()?;
-    let bytes = photocraft_io::export(&full, &format!("estimate.{}", s_fmt(f)), &settings(f).io_options()).ok()?.bytes;
+    let bytes = advanced::encode(&full, f, &format!("estimate.{}", s_fmt(f)), |d, p, s| {
+        photocraft_io::export(d, p, &s.io_options()).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
+    })
+    .ok()?
+    .bytes;
     u64::try_from(bytes.len()).ok()
 }
 
@@ -647,6 +713,18 @@ fn poll_or_start_exact_estimate(
         && sig == signature
     {
         return Some(size);
+    }
+    let debounce = key.with("exact-estimate-debounce");
+    let now = web_time::Instant::now();
+    let previous: Option<(String, web_time::Instant)> = ui.data(|d| d.get_temp(debounce));
+    if previous.as_ref().is_none_or(|(s, _)| s != signature) {
+        ui.data_mut(|d| d.insert_temp(debounce, (signature.to_string(), now)));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        return None;
+    }
+    if previous.as_ref().is_some_and(|(_, t)| now.duration_since(*t) < std::time::Duration::from_millis(250)) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        return None;
     }
     let pending_key = key.with("exact-estimate-pending");
     if let Some((sig, result)) = ui.data(|d| d.get_temp::<(String, Done)>(pending_key)) {
@@ -770,6 +848,7 @@ fn resample_label(label: &str) -> &'static str {
 }
 
 fn apply_preset(f: &mut Map<String, Value>, settings: &photocraft_engine::export_preset_cmds::ExportPresetSettings, src_w: f64, src_h: f64) {
+    f.extend(settings.advanced.fields());
     f.insert("format".into(), json!(settings.format));
     f.insert("quality".into(), json!(settings.quality));
     f.insert("lossless".into(), json!(settings.lossless));
@@ -794,12 +873,13 @@ fn apply_preset(f: &mut Map<String, Value>, settings: &photocraft_engine::export
 
 fn preset_settings(f: &Map<String, Value>) -> Value {
     let metadata = s(f, "metadata");
-    let metadata = if ["none", "exif", "all"].contains(&metadata.as_str()) { metadata } else { "none".into() };
+    let metadata = if ["none", "exif", "all", "noCamera", "copyright"].contains(&metadata.as_str()) { metadata } else { "none".into() };
     let bits = s(f, "tgaBits");
     let bits = if ["auto", "24", "32"].contains(&bits.as_str()) { bits } else { "auto".into() };
     let scale = n(f, "scale", 100.0);
     let scale = if scale.is_finite() { scale.clamp(1.0, 1000.0) } else { 100.0 };
     json!({
+        "advanced": advanced::read(f).unwrap_or_default(),
         "format": s_fmt(f),
         "quality": n(f, "quality", 85.0).clamp(1.0, 100.0).round(),
         "lossless": lossless(f),
@@ -810,7 +890,7 @@ fn preset_settings(f: &Map<String, Value>) -> Value {
         "lockAspect": f.get("lockAspect").and_then(Value::as_bool).unwrap_or(true),
         "sizing": if s(f, "sizing") == "pixels" { "pixels" } else { "scale" },
         "metadata": metadata,
-        "profile": if s(f, "profile") == "srgb" { "srgb" } else { "document" },
+        "profile": if s(f,"profile").is_empty(){"document".into()}else{s(f,"profile")},
         "embedProfile": f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true),
         "tgaBits": bits,
         "resample": resample_method(f, None).unwrap_or(DEFAULT_RESAMPLE),
@@ -863,7 +943,7 @@ fn preset_fields(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String,
         f.insert("__presetName".into(), json!(name));
         ui.horizontal(|ui| {
             if crate::widgets::secondary_button(ui, tl!("Save"), 70.0).clicked() || enter {
-                match app.run("file.export.presets.save", json!({"name": name, "settings": preset_settings(f)})) {
+                match advanced::read(f).and_then(|_| app.run("file.export.presets.save", json!({"name": name, "settings": preset_settings(f)}))) {
                     Ok(v) => {
                         if let Some(saved) = v.get("preset").and_then(|p| p.get("name")).and_then(Value::as_str) {
                             f.insert("__preset".into(), json!(saved));
@@ -892,101 +972,35 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
     let t = Tokens::get(ui.ctx());
     let Some(doc) = app.session.active().map(|s| s.doc.clone()) else { return };
     let source_profile = effective_source_profile(app, &doc);
+    let (w, h) = (n(f, "__w", f64::from(doc.size.width)), n(f, "__h", f64::from(doc.size.height)));
+    let controls_width = (ui.available_width() - 320.0).max(360.0);
     ui.horizontal_top(|ui| {
-        // Left: settings.
-        ui.vertical(|ui| {
-            ui.set_width(248.0);
-            ui.label(egui::RichText::new(tl!("File Settings")).font(crate::theme::semibold(12.0)).color(t.text));
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Format")).color(t.text_dim));
-                let mut fmt = s_fmt(f);
-                let opts: Vec<(String, &str)> = FORMATS.iter().map(|(k, l)| (k.to_string(), *l)).collect();
-                if crate::widgets::dropdown(ui, "export-format", tl!("Format"), &mut fmt, &opts, 130.0) {
-                    set_format_defaults(f, &fmt, &app.session.prefs().export);
-                }
+        // Complete settings stay scrollable on laptop displays; preview and action buttons stay visible.
+        egui::ScrollArea::vertical().id_salt("export-panel-scroll").max_height((ui.ctx().content_rect().height() - 220.0).clamp(300.0, 720.0)).show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(controls_width);
+                ui.set_max_width(controls_width);
+                advanced::body(app, ui, f, w, h);
             });
-            let fmt = s_fmt(f);
-            if fmt == "webp" {
-                let mut ll = lossless(f);
-                crate::widgets::checkbox(ui, &mut ll, tl!("Lossless"));
-                f.insert("lossless".into(), json!(ll));
-            }
-            if fmt == "jpg" || (fmt == "webp" && !lossless(f)) {
-                let mut q = n(f, "quality", 85.0) as f32;
-                crate::widgets::slider_row(ui, tl!("Quality"), &mut q, 1.0..=100.0, "%", None);
-                f.insert("quality".into(), json!(q.round()));
-            }
-            if fmt == "tga" {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tl!("Resolution")).color(t.text_dim));
-                    let mut bits = s(f, "tgaBits");
-                    let opts: Vec<(String, &str)> =
-                        vec![("auto".into(), tl!("Auto")), ("24".into(), tl!("24 bits/pixel")), ("32".into(), tl!("32 bits/pixel"))];
-                    if crate::widgets::dropdown(ui, "export-tga-bits", tl!("Depth"), &mut bits, &opts, 130.0) {
-                        f.insert("tgaBits".into(), json!(bits));
-                    }
-                });
-            }
-            if fmt != "jpg" {
-                let mut tr = f.get("transparency").and_then(Value::as_bool).unwrap_or(true);
-                crate::widgets::checkbox(ui, &mut tr, tl!("Transparency"));
-                f.insert("transparency".into(), json!(tr));
-            }
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Metadata")).color(t.text_dim));
-                let mut m = s(f, "metadata");
-                let opts: Vec<(String, &str)> = vec![("none".into(), tl!("None")), ("exif".into(), tl!("EXIF")), ("all".into(), tl!("All"))];
-                if crate::widgets::dropdown(ui, "export-metadata", tl!("Metadata"), &mut m, &opts, 130.0) {
-                    f.insert("metadata".into(), json!(m));
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Color Profile")).color(t.text_dim));
-                let mut profile = s(f, "profile");
-                if profile != "srgb" {
-                    profile = "document".into();
-                }
-                let opts: Vec<(String, &str)> = vec![("document".into(), tl!("Document Profile")), ("srgb".into(), tl!("Convert to sRGB"))];
-                if crate::widgets::dropdown(ui, "export-profile", tl!("Color Profile"), &mut profile, &opts, 130.0) {
-                    f.insert("profile".into(), json!(profile));
-                }
-            });
-            let mut embed = f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true);
-            crate::widgets::checkbox(ui, &mut embed, tl!("Embed Color Profile"));
-            f.insert("embedProfile".into(), json!(embed));
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new(tl!("Image Size")).font(crate::theme::semibold(12.0)).color(t.text));
-            let (bw, bh) = (n(f, "__w", f64::from(doc.size.width)), n(f, "__h", f64::from(doc.size.height)));
-            size_fields(ui, f, bw, bh);
-            resample_field(ui, f);
-            let (w, h) = (n(f, "width", bw), n(f, "height", bh));
-            ui.label(egui::RichText::new(format!("{w} × {h} px")).color(t.text_dim).size(11.5));
-            if fmt == "ico" && (w > 256.0 || h > 256.0) {
-                ui.label(egui::RichText::new(tl!("ICO is limited to 256 × 256 pixels")).color(t.warning));
-            }
-            preset_fields(app, ui, f, bw, bh);
         });
-        ui.add_space(12.0);
         // Right: preview + estimated size.
         ui.vertical(|ui| {
+            if s_fmt(f) == "original" {
+                ui.set_width(300.0);
+                ui.label("The original file is copied unchanged. Document edits are excluded.");
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Ok(meta) = std::fs::metadata(s(f, "__sourcePath")) {
+                    ui.label(crate::sizing::human_bytes(meta.len() as f64));
+                }
+                return;
+            }
             let layer = f.get("__layer").and_then(Value::as_u64);
             let key = egui::Id::unique(("export-preview", doc.id.0, app.session.active().map_or(0, |s| s.revision), layer));
-            let sig = format!(
-                "{}{}{}{}{}{}{}{}{}{}{}{}{}",
-                s_fmt(f),
-                n(f, "quality", 85.0),
-                lossless(f),
-                f.get("transparency").map(|v| v.to_string()).unwrap_or_default(),
-                n(f, "scale", 100.0),
-                n(f, "width", 0.0),
-                n(f, "height", 0.0),
-                s(f, "metadata"),
-                s(f, "tgaBits"),
-                s(f, "profile"),
-                f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true),
-                s(f, "sizing"),
-                s(f, "resample")
-            );
+            let mut render_settings = settings_of(f);
+            for key in ["folder", "subfolder", "destination", "filenameTemplate", "conflict"] {
+                render_settings.remove(key);
+            }
+            let sig = serde_json::to_string(&render_settings).unwrap_or_default();
             let sig = format!("{sig}:{}", source_profile.content_hash());
             let cached: Option<CachedPreview> = ui.data(|d| d.get_temp(key));
             let preview = match cached.filter(|cached| cached.signature == sig) {
@@ -1042,10 +1056,11 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     }
     let doc = source_document(app, f)?;
     let source_profile = effective_source_profile(app, &doc);
-    let stem = doc.name.rsplit_once('.').map_or(doc.name.as_str(), |(a, _)| a).to_string();
-    let ext = s_fmt(f);
-    let suggested = format!("{stem}.{ext}");
+    let suggested = export_filename(&doc, f, 1)?;
     let f = f.clone();
+    if let Some(path) = advanced::destination(&f, &suggested)? {
+        return write_export(app, &doc, &f, &path, &source_profile);
+    }
     app.pick_save(&suggested, move |app, path| {
         let r = write_export(app, &doc, &f, &path, &source_profile)?;
         // An action being recorded keeps a whole-document export with its destination and
@@ -1059,11 +1074,54 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     })
 }
 
+fn export_filename(doc: &Document, f: &Map<String, Value>, number: usize) -> Result<String, String> {
+    let a = advanced::read(f)?;
+    let fmt = s_fmt(f);
+    let (ext, width, height) = if fmt == "original" {
+        let ext = std::path::Path::new(&s(f, "__sourcePath")).extension().and_then(|e| e.to_str()).ok_or("No original file extension")?.to_string();
+        (ext, doc.size.width, doc.size.height)
+    } else {
+        let (w, h) = export_pixels(f64::from(doc.size.width), f64::from(doc.size.height), f, None)?;
+        (fmt, w as u32, h as u32)
+    };
+    photocraft_engine::export_panel::file_name(&a.filename_template, &doc.name, &ext, number, width, height)
+}
+
 /// Exports `doc` to `path` with the dialog settings `f` (Export As, and its replayed action step).
 fn write_export(app: &mut PhotocraftApp, doc: &Document, f: &Map<String, Value>, path: &str, source_profile: &Profile) -> Result<Value, String> {
-    let out = export_document(doc, f, None, source_profile)?;
-    let export = app.services.export.as_ref().ok_or("no exporter configured")?;
-    let (bytes, warnings) = export(&out, path, &settings(f))?;
+    let Some(path) = advanced::conflict_path(f, path)? else {
+        app.ui.status = "Export skipped: file exists".into();
+        return Ok(json!({"path":path,"skipped":true}));
+    };
+    let path = path.as_str();
+    let result = if s_fmt(f) == "original" {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let source = s(f, "__sourcePath");
+            if source.is_empty() {
+                return Err("This document has no original file on disk".into());
+            }
+            if std::path::Path::new(&source).extension() != std::path::Path::new(path).extension() {
+                return Err("An original copy must keep its original file extension".into());
+            }
+            let bytes = std::fs::read(&source).map_err(|e| e.to_string())?;
+            photocraft_engine::export_panel::LimitedExport { bytes, warnings: Vec::new(), quality: None }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            return Err("Original file copying is available in the desktop app".into());
+        }
+    } else {
+        let out = export_document(doc, f, None, source_profile)?;
+        let export = app.services.export.as_ref().ok_or("no exporter configured")?;
+        advanced::encode(&out, f, path, export)?
+    };
+    let bytes = result.bytes;
+    let warnings = result.warnings;
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(parent) = std::path::Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     let write = app.services.write.as_mut().ok_or("no writer configured")?;
     write(path, &bytes)?;
     let template = "Exported {path} ({size})";
@@ -1072,14 +1130,14 @@ fn write_export(app: &mut PhotocraftApp, doc: &Document, f: &Map<String, Value>,
     let template = "Exported {path}";
     let what = crate::i18n::fmt(tl!(template), &[("path", &crate::file_open::display_name(path))]);
     crate::notices::io_warnings(app, &what, &warnings);
-    Ok(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}))
+    Ok(json!({"path": path, "bytes": bytes.len(), "warnings": warnings, "quality":result.quality}))
 }
 
 /// Replays a recorded Export As step (#7207): the active document exported to the recorded `path`
 /// with the recorded settings, without the dialog. The remembered dialog settings are untouched.
 pub(crate) fn replay(app: &mut PhotocraftApp, params: &Value) -> Result<Value, String> {
     let path = params.get("path").and_then(Value::as_str).filter(|p| !p.is_empty()).ok_or("Export As needs a `path`")?;
-    let f = params.as_object().map(settings_of).unwrap_or_default();
+    let mut f = params.as_object().map(settings_of).unwrap_or_default();
     if let Some(format) = f.get("format").filter(|v| !valid_setting("format", v)) {
         return Err(format!("Export As can't write the format {format}"));
     }
@@ -1087,6 +1145,9 @@ pub(crate) fn replay(app: &mut PhotocraftApp, params: &Value) -> Result<Value, S
     // default: the step would otherwise write something other than what was recorded.
     if let Some((key, v)) = f.iter().find(|(k, v)| !valid_setting(k, v)) {
         return Err(format!("Export As: `{key}` can't be {v}"));
+    }
+    if let Some(path) = app.session.active().and_then(|st| st.path.as_ref()) {
+        f.insert("__sourcePath".into(), json!(path));
     }
     let doc = app.session.active().ok_or("no document")?.doc.clone();
     let source_profile = effective_source_profile(app, &doc);
@@ -1104,27 +1165,30 @@ fn confirm_layers(app: &mut PhotocraftApp, f: &Map<String, Value>, ids: &[photoc
     if docs.is_empty() {
         return Err("no selected layers".into());
     }
-    let stem = st.doc.name.rsplit_once('.').map_or(st.doc.name.as_str(), |(a, _)| a);
-    let suggested = format!("{}.{}", export_name(stem), s_fmt(f));
-    let (f, settings) = (f.clone(), settings(f));
-    app.pick_save(&suggested, move |app, path| {
+    if s_fmt(f) == "original" {
+        return Err("Original file copying is available for whole-document exports".into());
+    }
+    let a = advanced::read(f)?;
+    let suggested = export_filename(&st.doc, f, 1)?;
+    let destination = advanced::destination(f, &suggested)?;
+    let f = f.clone();
+    let export_batch = move |app: &mut PhotocraftApp, path: String| {
         let mut exported = Vec::new();
-        for (doc, path) in docs.iter().zip(batch_paths(&path, &docs)) {
-            let out = export_document(doc, &f, None, &source_profile)?;
-            let export = app.services.export.as_ref().ok_or("no exporter configured")?;
-            let (bytes, warnings) = export(&out, &path, &settings)?;
-            let write = app.services.write.as_mut().ok_or("no writer configured")?;
-            write(&path, &bytes)?;
-            let template = "Exported {path}";
-            let what = crate::i18n::fmt(tl!(template), &[("path", &crate::file_open::display_name(&path))]);
-            crate::notices::io_warnings(app, &what, &warnings);
-            exported.push(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}));
+        for (index, (doc, default_path)) in docs.iter().zip(batch_paths(&path, &docs)).enumerate() {
+            let target = if index == 0 || a.filename_template == "{name}" {
+                default_path
+            } else {
+                let name = export_filename(doc, &f, index + 1)?;
+                std::path::Path::new(&path).parent().unwrap_or_else(|| std::path::Path::new("")).join(name).to_string_lossy().into_owned()
+            };
+            exported.push(write_export(app, doc, &f, &target, &source_profile)?);
         }
         let template = "Exported {n} files";
         app.ui.status = crate::i18n::fmt(tl!(template), &[("n", &exported.len().to_string())]);
         app.ui.status_error = false;
         Ok(json!({"files": exported}))
-    })
+    };
+    if let Some(path) = destination { export_batch(app, path) } else { app.pick_save(&suggested, export_batch) }
 }
 
 /// File › Export › Quick Export as PNG: the format, quality, metadata, colour space and location

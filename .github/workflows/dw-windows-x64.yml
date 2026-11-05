@@ -1,0 +1,119 @@
+name: PhotoCraft DW - Windows x64 Portable
+
+on:
+  push:
+    branches:
+      - feature/dw-0.20.2-full-20261105
+    paths:
+      - '.github/workflows/dw-windows-x64.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'apps/**'
+      - 'crates/**'
+      - 'packaging/windows/**'
+      - 'assets/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+      PHOTOCRAFT_REQUIRE_WINRES: "1"
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+      CRAFT_FONTS_REQUIRED: "1"
+    steps:
+      - name: Checkout PhotoCraft DW sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned craft-fonts
+        uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+
+      - name: Install Rust stable MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: photocraft-dw-windows-x64
+
+      - name: Build GUI and CLI with JPEG XL, EXIF/XMP and batch converter
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PHOTOCRAFT_BUILD_SHA = (git rev-parse HEAD).Trim()
+          $env:PHOTOCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          cargo build --profile dw-release --locked --target x86_64-pc-windows-msvc -p photocraft -p photocraft-cli --features heif --bins
+          if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
+
+      - name: Verify PE executables and smoke test CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = 'target/x86_64-pc-windows-msvc/dw-release'
+          foreach ($name in @('photocraft.exe','photocraft-cli.exe')) {
+            $path = Join-Path $bin $name
+            if (-not (Test-Path $path)) { throw "Missing binary: $path" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $path))
+            $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            if ($machine -ne 0x8664) { throw "$name is not Windows x64" }
+            Write-Output "$name PE x64 OK"
+          }
+          & "$bin/photocraft-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLI smoke test failed' }
+
+      - name: Create unsigned portable Windows ZIP and SHA256
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = 'PhotoCraft_0.20.2_DW_1_Windows_x64_Portable'
+          $stage = Join-Path 'out' $pkg
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          $bin = 'target/x86_64-pc-windows-msvc/dw-release'
+          Copy-Item (Join-Path $bin 'photocraft.exe') $stage
+          Copy-Item (Join-Path $bin 'photocraft-cli.exe') $stage
+          Copy-Item 'packaging/windows/portable.txt' $stage
+          foreach ($file in @('DW_README_PL.md','DW_RELEASE_NOTES_0.20.2.md','BATCH_CONVERTER_PL.md','JXL_README_PL.md','EXIF_FIX_README_PL.md','README.md','NOTICE','ATTRIBUTION.md','NOTICE-JXL.md','LICENSE','LICENSE-MIT','LICENSE-APACHE')) {
+            if (Test-Path $file) { Copy-Item $file $stage }
+          }
+          Get-ChildItem 'craft-fonts/fonts' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $lic = Join-Path $_.FullName 'OFL.txt'
+            if (Test-Path $lic) { Copy-Item $lic (Join-Path $stage "OFL-$($_.Name).txt") }
+          }
+          $zip = Join-Path 'out' "$pkg.zip"
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+          $check = Join-Path 'out' 'verify-zip'
+          Expand-Archive $zip $check -Force
+          foreach ($f in @('photocraft.exe','photocraft-cli.exe','portable.txt')) {
+            if (-not (Test-Path (Join-Path $check $f))) { throw "ZIP has no $f in root" }
+          }
+          Remove-Item -Recurse -Force $check
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $pkg.zip" | Set-Content -Path (Join-Path 'out' 'SHA256SUMS.txt') -Encoding ascii
+          Get-Item $zip | Format-Table Name,Length
+          Write-Output "SHA256 $hash"
+
+      - name: Upload Windows portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoCraft-0.20.2-DW1-Windows-x64-Portable
+          path: |
+            out/PhotoCraft_0.20.2_DW_1_Windows_x64_Portable.zip
+            out/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30

@@ -35,6 +35,7 @@ let out = encode(&img, Format::Tiff, &EncodeOptions::default())?;
 | PNG | yes | yes | U8, U16 | Gray, GrayA, RGB, RGBA | yes | yes (iCCP) | yes (eXIf) | yes (iTXt `XML:com.adobe.xmp`) | yes (pHYs) | yes (tEXt/zTXt/iTXt) | no | `png` |
 | JPEG | yes | yes | U8 | Gray, RGB, CMYK | no | yes (multi-segment APP2) | yes (APP1) | yes (APP1) | yes (JFIF) | no | yes | `zune-jpeg` / `jpeg-encoder` |
 | TIFF | yes | yes | U8, U16, F32 | all six (CMYK, CMYK+A included) | yes | yes (tag 34675) | no | yes (tag 700) | yes | yes (Description, Make, Model, Software, DateTime, Artist, Copyright) | no | `tiff` |
+| JPEG XL | yes | yes (native) | U8, U16 | RGB, RGBA (gray expanded) | yes | yes (lossless) | yes | yes | no | no | optional | `jxl-oxide` / `jixel`, ported from LightCraft |
 | WebP | yes | yes | U8 | RGB, RGBA | yes | yes | yes | yes | no | no | yes (VP8, when `webp_lossless` is off) | `image-webp` / built-in VP8 |
 | GIF | yes | yes | U8 | RGBA | 1-bit | no | no | no | no | no | yes (256-colour palette) | `image` |
 | BMP | yes | yes | U8 | RGB, RGBA | yes | no | no | no | no | no | no | `image` |
@@ -254,8 +255,10 @@ embedded table (and a PNG's transparent entry) so `photocraft-io` can open them 
     ms in release). Image data cut off by the end of the file decodes with
     `DecodeWarning::Truncated`; a file far too small for its declared size (more than any
     compression could expand) is refused before allocating.
-  * YCbCr, CIE Lab, signed integers and compressions that the `tiff` crate lacks (CCITT,
-    JPEG-in-TIFF) return `Unsupported`.
+  * YCbCr with three 8- or 16-bit samples decodes to RGB. YCbCr with other sample counts or
+    bit depths returns `Unsupported`. JPEG-compressed YCbCr uses the full-range JFIF conversion.
+  * 8/16-bit CIELab and ICCLab decode to the Lab channel layout.
+  * Signed integer samples and unsupported compression methods return `Unsupported`.
 * **TIFF encode** writes classic TIFF, or BigTIFF when `EncodeOptions::tiff_bigtiff` is set or
   the file could pass 4 GiB. `Metadata::extra_samples` (up to 16) are written after the colour
   and alpha samples, with their `kind` in the ExtraSamples tag (a reserved `kind` above 2 is

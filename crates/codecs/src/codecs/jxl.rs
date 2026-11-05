@@ -1,159 +1,234 @@
-//! Pure-Rust lossless JPEG XL (Modular) writer.
-//!
-//! Currently writes a bare JPEG XL codestream. The encoder accepts 8- or 16-bit
-//! gray, RGB and RGBA samples, but does not write ICC/EXIF/XMP boxes.
-//! Gray+alpha sources are expanded losslessly to RGBA by the export plan.
-//! The flat export pipeline converts tagged RGB documents to sRGB first.
+//! LightCraft's JPEG XL mechanism, adapted to PhotoCraft's samples and limits.
+//! Original LightCraft code: MIT OR Apache-2.0, see `NOTICE-JXL.md`.
+//! No external codec executable or shared JPEG XL library is required.
+//! The low-level lossy encoder expects sRGB samples; the document IO layer performs
+//! profile conversion before calling it. Lossless mode preserves an embedded RGB ICC.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
-use zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions as ZuneOptions};
-use zune_jpegxl::JxlSimpleEncoder;
-
-use crate::error::CodecError;
 use crate::fidelity::Plan;
-use crate::format::Format;
-use crate::image::{ChannelLayout, Image, SampleType};
+use crate::{CodecError, EncodeOptions, Format, Image, Limits};
 
 const F: Format = Format::Jxl;
 
-// zune-jpegxl 0.5.2 emits ExtraChannelInfo(all_default=true) for every alpha
-// channel. In JPEG XL that flag means *8-bit* alpha, even when the modular
-// payload was encoded from 16-bit samples. Replace only that metadata bundle,
-// leaving the entire encoded frame and its TOC untouched. The replacement is
-// exactly 16 bits longer, so subsequent byte-aligned data stays aligned.
-//
-// This deliberately verifies the pinned encoder's header layout rather than
-// trying to parse or rewrite arbitrary JPEG XL codestreams. A different header
-// must fail closed, not produce a file that silently corrupts transparency.
-fn correct_16_bit_alpha_header(bytes: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CodecError> {
-    fn read(bytes: &[u8], pos: &mut usize, count: usize) -> Option<u32> {
-        let mut value = 0u32;
-        for bit in 0..count {
-            let offset = *pos;
-            let byte = *bytes.get(offset / 8)?;
-            value |= u32::from((byte >> (offset % 8)) & 1) << bit;
-            *pos += 1;
+pub(crate) fn decode(bytes: &[u8], limits: &Limits) -> Result<Image, CodecError> {
+    #[cfg(feature = "jxl")]
+    {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder::decode(bytes, limits)))
+            .unwrap_or_else(|_| Err(CodecError::malformed(F, "JPEG XL decoder panicked")))
+    }
+    #[cfg(not(feature = "jxl"))]
+    {
+        let _ = (bytes, limits);
+        Err(CodecError::unsupported(F, "JPEG XL decoding is not enabled"))
+    }
+}
+
+pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError> {
+    #[cfg(all(feature = "jxl", not(target_arch = "wasm32")))]
+    {
+        // Like LightCraft, turn a third-party encoder assertion into an export error.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encoder::encode(src, plan, opts)))
+            .unwrap_or_else(|_| Err(CodecError::encode(F, "JPEG XL encoder panicked")))
+    }
+    #[cfg(any(not(feature = "jxl"), target_arch = "wasm32"))]
+    {
+        if !opts.jxl.lossless || opts.jxl.hdr || opts.jxl.progressive || opts.jxl.effort != crate::JxlEffort::Normal {
+            return Err(CodecError::unsupported(F, "these JPEG XL settings require the desktop build with the jxl feature"));
         }
-        Some(value)
+        super::jxl_basic::encode(src, plan)
+    }
+}
+
+#[cfg(feature = "jxl")]
+mod decoder {
+    use super::{CodecError, F, Image, Limits};
+    use crate::options::alloc_zeroed;
+    use crate::{ChannelLayout, DecodeWarning, Metadata, SampleType};
+    use jxl_oxide::{AllocTracker, AuxBoxData, InitializeResult, JxlImage, PixelFormat};
+
+    const INPUT_CHUNK: usize = 4096;
+
+    fn err(e: impl std::fmt::Display) -> CodecError {
+        CodecError::malformed(F, e)
     }
 
-    fn read_dimension(bytes: &[u8], pos: &mut usize) -> Option<u32> {
-        let bits = match read(bytes, pos, 2)? {
-            0 => 9,
-            1 => 13,
-            2 => 18,
-            _ => 30,
-        };
-        read(bytes, pos, bits)?.checked_add(1)
+    fn layout(img: &JxlImage) -> ChannelLayout {
+        match img.pixel_format() {
+            PixelFormat::Gray => ChannelLayout::Gray,
+            PixelFormat::Graya => ChannelLayout::GrayA,
+            PixelFormat::Rgb => ChannelLayout::Rgb,
+            PixelFormat::Rgba => ChannelLayout::Rgba,
+            PixelFormat::Cmyk => ChannelLayout::Cmyk,
+            PixelFormat::Cmyka => ChannelLayout::CmykA,
+        }
     }
 
-    fn write_bits(out: &mut Vec<u8>, pos: &mut usize, count: usize, value: u32) {
-        for bit in 0..count {
-            if (*pos).is_multiple_of(8) {
-                out.push(0);
+    fn sample(img: &JxlImage) -> SampleType {
+        let meta = &img.image_header().metadata;
+        let depths = std::iter::once(meta.bit_depth).chain(meta.ec_info.iter().filter(|e| e.is_alpha()).map(|e| e.bit_depth));
+        let mut sample = SampleType::U8;
+        for depth in depths {
+            if matches!(depth, jxl_oxide::image::BitDepth::FloatSample { .. }) || depth.bits_per_sample() > 16 {
+                return SampleType::F32;
             }
-            out[*pos / 8] |= (((value >> bit) & 1) as u8) << (*pos % 8);
-            *pos += 1;
+            if depth.bits_per_sample() > 8 {
+                sample = SampleType::U16;
+            }
         }
+        sample
     }
 
-    let mut pos = 0;
-    let header_matches = read(bytes, &mut pos, 16) == Some(0x0aff)
-        && read(bytes, &mut pos, 1) == Some(0)
-        && read_dimension(bytes, &mut pos) == Some(height)
-        && read(bytes, &mut pos, 3) == Some(0)
-        && read_dimension(bytes, &mut pos) == Some(width)
-        && read(bytes, &mut pos, 1) == Some(0) // metadata not all-default
-        && read(bytes, &mut pos, 1) == Some(0) // no extra fields
-        && read(bytes, &mut pos, 1) == Some(0) // integer samples
-        && read(bytes, &mut pos, 2) == Some(3) // custom bit depth
-        && read(bytes, &mut pos, 6) == Some(15) // 16 bits
-        && read(bytes, &mut pos, 1) == Some(0) // uses >14 bits
-        && read(bytes, &mut pos, 2) == Some(1); // one extra channel
-    let alpha_flag_pos = pos;
-    let header_matches = header_matches
-        && read(bytes, &mut pos, 1) == Some(1) // incorrect default 8-bit alpha
-        && read(bytes, &mut pos, 1) == Some(0) // not XYB
-        && read(bytes, &mut pos, 1) == Some(1) // default sRGB encoding (RGBA)
-        && read(bytes, &mut pos, 2) == Some(0) // no extensions
-        && read(bytes, &mut pos, 1) == Some(1); // default transform
-
-    let frame_offset = pos.div_ceil(8);
-    let header_matches = header_matches && frame_offset <= bytes.len() && (pos..frame_offset * 8).all(|bit| bytes[bit / 8] & (1 << (bit % 8)) == 0);
-    if !header_matches {
-        return Err(CodecError::encode(F, "unexpected zune-jpegxl header for 16-bit alpha"));
+    // Bounded feeds let us reject excessive dimensions before loading image frames.
+    // Feeding a complete file at once would also copy an arbitrary container tail.
+    fn open(bytes: &[u8], limits: &Limits) -> Result<JxlImage, CodecError> {
+        let tracker = AllocTracker::with_limit(limits.alloc_usize());
+        let mut uninit = JxlImage::builder().alloc_tracker(tracker).build_uninit();
+        let mut rest = bytes;
+        let mut window = INPUT_CHUNK;
+        let mut img = loop {
+            let consumed = uninit.feed_bytes(rest.get(..window).unwrap_or(rest)).map_err(err)?;
+            rest = rest.get(consumed..).unwrap_or_default();
+            match uninit.try_init().map_err(err)? {
+                InitializeResult::Initialized(img) => break img,
+                InitializeResult::NeedMoreData(more) => uninit = more,
+            }
+            if consumed == 0 {
+                if window >= rest.len() {
+                    return Err(err("truncated JPEG XL header"));
+                }
+                window = window.saturating_mul(2);
+            }
+        };
+        limits.check(img.width(), img.height(), layout(&img), sample(&img))?;
+        // Rendering also needs floating-point working planes for colour and extra channels.
+        limits.check_bytes(img.width(), img.height(), 4 * (3 + img.image_header().metadata.ec_info.len() as u64))?;
+        // A JPEG XL container may place EXIF / XMP boxes *after* the last image
+        // frame. is_loading_done() only describes the codestream, not the rest
+        // of the container: stopping there silently discards trailing metadata.
+        // Continue feeding the whole file in bounded pieces before finalize().
+        let mut window = INPUT_CHUNK;
+        while !rest.is_empty() {
+            let consumed = img.feed_bytes(rest.get(..window).unwrap_or(rest)).map_err(err)?;
+            if consumed == 0 {
+                // Like the header parser, retry with a larger slice if a box
+                // header requires more contiguous input to make progress.
+                if window >= rest.len() {
+                    return Err(err("truncated JPEG XL container"));
+                }
+                window = window.saturating_mul(2);
+                continue;
+            }
+            rest = rest.get(consumed..).unwrap_or_default();
+            window = INPUT_CHUNK;
+        }
+        img.finalize().map_err(err)?;
+        if !img.is_loading_done() {
+            return Err(err("truncated JPEG XL image"));
+        }
+        Ok(img)
     }
 
-    let mut fixed = Vec::with_capacity(bytes.len() + 2);
-    let mut cursor = 0;
-    for bit in 0..alpha_flag_pos {
-        write_bits(&mut fixed, &mut cursor, 1, u32::from((bytes[bit / 8] >> (bit % 8)) & 1));
+    pub(super) fn decode(bytes: &[u8], limits: &Limits) -> Result<Image, CodecError> {
+        let img = open(bytes, limits)?;
+        let (w, h, layout, sample) = (img.width(), img.height(), layout(&img), sample(&img));
+        let render = img.render_frame(0).map_err(err)?;
+        let mut stream = render.stream();
+        if stream.width() != w || stream.height() != h || stream.channels() as usize != layout.channels() {
+            return Err(err("inconsistent JPEG XL frame dimensions or channels"));
+        }
+        let count = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(layout.channels())).ok_or_else(|| err("JPEG XL image too large"))?;
+        let mut out = match sample {
+            SampleType::U8 => {
+                let mut data = alloc_zeroed::<u8>(count)?;
+                if stream.write_to_buffer(&mut data) != count {
+                    return Err(err("incomplete JPEG XL frame"));
+                }
+                Image::from_u8(w, h, layout, data)?
+            }
+            SampleType::U16 => {
+                let mut data = alloc_zeroed::<u16>(count)?;
+                if stream.write_to_buffer(&mut data) != count {
+                    return Err(err("incomplete JPEG XL frame"));
+                }
+                Image::from_u16(w, h, layout, &data)?
+            }
+            _ => {
+                let mut data = alloc_zeroed::<f32>(count)?;
+                if stream.write_to_buffer(&mut data) != count {
+                    return Err(err("incomplete JPEG XL frame"));
+                }
+                Image::from_f32(w, h, layout, &data)?
+            }
+        };
+        // Keep the profile of the actual rendered samples, including enum-tagged P3/HDR files.
+        out.icc = Some(img.original_icc().map_or_else(|| img.rendered_icc(), <[u8]>::to_vec));
+        let exif = match img.aux_boxes().first_exif().map_err(err)? {
+            AuxBoxData::Data(exif) => Some(exif.payload().to_vec()),
+            _ => None,
+        };
+        let xmp = match img.aux_boxes().first_xml() {
+            AuxBoxData::Data(xmp) => Some(String::from_utf8_lossy(xmp).trim_end_matches('\0').to_string()),
+            _ => None,
+        };
+        // jxl-oxide applies codestream orientation. Normalize EXIF/XMP so it isn't applied twice.
+        out.meta =
+            Metadata { exif: exif.map(|e| crate::upright_exif(&e).into_owned()), xmp: xmp.map(|x| crate::upright_xmp(&x).into_owned()), ..Default::default() };
+        if img.num_loaded_keyframes() > 1 {
+            out.warnings.push(DecodeWarning::MoreFrames { total: u32::try_from(img.num_loaded_keyframes()).ok() });
+        }
+        Ok(out)
     }
-
-    // JPEG XL ExtraChannelInfo, non-default, straight 16-bit alpha:
-    // type=kAlpha (Enum=0), bit_depth=uint16, dim_shift=0, name_len=0,
-    // alpha_associated=false. Adds exactly 16 bits versus all_default=true.
-    write_bits(&mut fixed, &mut cursor, 1, 0);
-    write_bits(&mut fixed, &mut cursor, 2, 0);
-    write_bits(&mut fixed, &mut cursor, 1, 0);
-    write_bits(&mut fixed, &mut cursor, 2, 3);
-    write_bits(&mut fixed, &mut cursor, 6, 15);
-    write_bits(&mut fixed, &mut cursor, 2, 0);
-    write_bits(&mut fixed, &mut cursor, 2, 0);
-    write_bits(&mut fixed, &mut cursor, 1, 0);
-
-    for bit in alpha_flag_pos + 1..frame_offset * 8 {
-        write_bits(&mut fixed, &mut cursor, 1, u32::from((bytes[bit / 8] >> (bit % 8)) & 1));
-    }
-    if cursor != (frame_offset + 2) * 8 {
-        return Err(CodecError::encode(F, "JPEG XL alpha header alignment mismatch"));
-    }
-    fixed.extend_from_slice(&bytes[frame_offset..]);
-    Ok(fixed)
 }
 
-pub(crate) fn encode(image: &Image, plan: Plan) -> Result<Vec<u8>, CodecError> {
-    let image = image.converted(plan.layout, plan.sample);
-    let space = match image.layout() {
-        ChannelLayout::Gray => ColorSpace::Luma,
-        ChannelLayout::GrayA => ColorSpace::LumaA,
-        ChannelLayout::Rgb => ColorSpace::RGB,
-        ChannelLayout::Rgba => ColorSpace::RGBA,
-        _ => return Err(CodecError::unsupported(F, "JPEG XL export supports grayscale and RGB, with optional alpha")),
-    };
-    let depth = match image.sample_type() {
-        SampleType::U8 => BitDepth::Eight,
-        SampleType::U16 => BitDepth::Sixteen,
-        _ => return Err(CodecError::unsupported(F, "JPEG XL lossless export supports 8 or 16-bit integer pixels")),
-    };
-    let (width, height) = image.dimensions();
-    let samples = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(image.layout().channels()))
-        .and_then(|n| n.checked_mul(image.sample_type().bytes()))
-        .ok_or_else(|| CodecError::encode(F, "image dimensions overflow the buffer size"))?;
-    if image.data().len() != samples {
-        return Err(CodecError::InvalidImage("incorrect JPEG XL pixel buffer length".into()));
-    }
-    // A panic in an external image encoder must not terminate the host application.
-    catch_unwind(AssertUnwindSafe(|| {
-        let options = ZuneOptions::new(width as usize, height as usize, space, depth);
-        let mut output = Vec::new();
-        JxlSimpleEncoder::new(image.data(), options).encode(&mut output).map_err(|e| CodecError::encode(F, e.to_string()))?;
-        if depth == BitDepth::Sixteen && image.layout() == ChannelLayout::Rgba { correct_16_bit_alpha_header(&output, width, height) } else { Ok(output) }
-    }))
-    .unwrap_or_else(|_| Err(CodecError::encode(F, "the JPEG XL encoder failed")))
-}
+#[cfg(all(feature = "jxl", not(target_arch = "wasm32")))]
+mod encoder {
+    use super::{CodecError, EncodeOptions, F, Image, Plan};
+    use crate::{ChannelLayout, JxlEffort, SampleType};
+    use jixel::{ColorEncoding, EncodeConfig, Speed};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn alpha_header_correction_rejects_unexpected_or_truncated_headers() {
-        for bytes in [&[][..], &[0xff, 0x0a][..], &[0; 32][..]] {
-            assert!(correct_16_bit_alpha_header(bytes, 2, 2).is_err());
+    pub(super) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError> {
+        let img = src.converted(plan.layout, plan.sample);
+        let mut config = EncodeConfig::default()
+            .with_quality(f32::from(opts.jxl.quality.clamp(1, 100)))
+            .with_color_encoding(if opts.jxl.hdr { ColorEncoding::bt2020_pq() } else { ColorEncoding::srgb() })
+            .with_lossless(opts.jxl.lossless)
+            .with_progressive(opts.jxl.progressive)
+            .with_speed(match opts.jxl.effort {
+                JxlEffort::Fast => Speed::Fastest,
+                JxlEffort::Normal => Speed::Fast,
+            });
+        if opts.jxl.hdr {
+            config = config.with_intensity_target(10000.0);
         }
+        if opts.jxl.lossless
+            && opts.embed_icc
+            && let Some(icc) = &img.icc
+        {
+            config = config.with_icc_profile(icc.clone());
+        }
+        if opts.embed_metadata {
+            if let Some(exif) = super::super::webp::export_exif(&img) {
+                config = config.with_exif(exif);
+            }
+            if let Some(xmp) = &img.meta.xmp {
+                config = config.with_xmp(crate::resolution::export_xmp(xmp, img.meta.dpi).as_bytes().to_vec());
+            }
+        }
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let alpha = img.layout() == ChannelLayout::Rgba;
+        let encoded = match img.sample_type() {
+            SampleType::U8 => {
+                if alpha {
+                    jixel::encode_image_with_alpha(img.data(), w, h, &config)
+                } else {
+                    jixel::encode_image(img.data(), w, h, &config)
+                }
+            }
+            SampleType::U16 => {
+                let data = img.to_u16_samples().ok_or_else(|| CodecError::encode(F, "invalid 16-bit samples"))?;
+                if alpha { jixel::encode_image_with_alpha_16bit(&data, w, h, &config) } else { jixel::encode_image_16bit(&data, w, h, &config) }
+            }
+            _ => return Err(CodecError::encode(F, "JPEG XL export requires 8- or 16-bit samples")),
+        };
+        encoded.map_err(|e| CodecError::encode(F, e))
     }
 }
