@@ -54,7 +54,7 @@ Kodeki są wbudowane; instalacja cjxl/djxl/libjxl nie jest potrzebna.
 Przy konwersjach JPG → JXL i JXL → JPG wybierz **Metadata: All**.
 Dla zachowania również danych lokalizacji wyłącz **Remove location info**.
 Poprawiono odczyt metadanych umieszczonych po obrazie w kontenerze JXL.
-Bieżące wyniki weryfikacji gotowej paczki znajdują się w `RAPORT_TESTOW_DW.md`.
+Bieżące wyniki weryfikacji gotowej paczki znajdują się w `RAPORT_PhotoCraft_0.20.2_DW_1.md`.
 Zakres wykonanej weryfikacji opisano w raporcie dołączonym do paczki.
 
 ## Konwersja wielu zdjęć

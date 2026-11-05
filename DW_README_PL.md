@@ -35,6 +35,9 @@ Nadaj AppImage prawo uruchamiania i uruchom go. Bez FUSE:
 APPIMAGE_EXTRACT_AND_RUN=1 ./PhotoCraft_0.20.2_DW_1_MX23-x86_64.AppImage
 ```
 
+Ta paczka AppImage przechowuje ustawienia osobno, w katalogu
+`~/.config/PhotoCraftDW/0.20.2` (chyba że ustawiono `PHOTOCRAFT_CONFIG_DIR`).
+
 W razie problemu ze sterownikiem można dodać `--safe-gpu`. Opcja `--cli`
 uruchamia dołączony interfejs wiersza poleceń.
 
@@ -44,6 +47,10 @@ Rozpakuj całą paczkę do zapisywalnego folderu i uruchom **photocraft.exe**.
 Nie przenoś samego EXE, jeśli obok znajdują się biblioteki DLL.
 Dołączony `portable.txt` włącza standardowy tryb przenośny PhotoCraft; ustawienia
 i pliki odzyskiwania trafiają do `PhotoCraftData` obok programu.
+
+To wydanie zawiera własne rozszerzenia. Zainstalowanie oficjalnej aktualizacji
+z poziomu programu zastąpi je oficjalną wersją; kolejne wydania DW należy pobierać
+z gałęzi lub wydań autora rozszerzeń.
 
 ## Źródła i odtwarzanie kompilacji
 
