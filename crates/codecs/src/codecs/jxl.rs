@@ -31,7 +31,9 @@ pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Ve
     }
     #[cfg(any(not(feature = "jxl"), target_arch = "wasm32"))]
     {
-        let _ = opts;
+        if !opts.jxl.lossless || opts.jxl.hdr || opts.jxl.progressive || opts.jxl.effort != crate::JxlEffort::Normal {
+            return Err(CodecError::unsupported(F, "these JPEG XL settings require the desktop build with the jxl feature"));
+        }
         super::jxl_basic::encode(src, plan)
     }
 }
