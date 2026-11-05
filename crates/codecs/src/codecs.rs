@@ -23,3 +23,6 @@ pub(crate) mod via_image;
 pub(crate) mod vp8;
 pub(crate) mod webp;
 pub(crate) mod xpm;
+
+#[cfg(any(not(feature = "jxl"), target_arch = "wasm32"))]
+pub(crate) mod jxl_basic;

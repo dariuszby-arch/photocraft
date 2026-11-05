@@ -241,6 +241,8 @@ pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> R
         // A quality on a WebP save asks for the lossy encoder; the default WebP stays lossless.
         opts.encode.webp_quality = q;
         opts.encode.webp_lossless = false;
+        opts.encode.jxl.quality = q;
+        opts.encode.jxl.lossless = false;
     }
     if let Some(f) = save.jpeg_format {
         opts.encode.jpeg_format = f;

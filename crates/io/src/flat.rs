@@ -992,6 +992,14 @@ pub(crate) fn export_flat_with(doc: &Document, format: Format, opts: &ExportOpti
     ctl.progress(composite_share(format));
     strip_xmp(&mut img.meta, opts);
     let mut img = prepare_flat(img, format, &mut warnings)?;
+    if format == Format::Jxl && !opts.encode.jxl.lossless && !opts.encode.jxl.hdr {
+        // The native lossy encoder expects sRGB. Keep the current shared preparation
+        // (including streamed PNG) independent of format-specific encode options.
+        if let Some(srgb) = convert_rgb(&img, photocraft_cms::Builtin::Srgb.profile(), photocraft_cms::Intent::Perceptual, true, img.sample_type())? {
+            img = srgb;
+            warnings.push("colours converted to sRGB for lossy JPEG XL".into());
+        }
+    }
     if format == Format::Tga {
         img = tga_image(doc, img, opts.tga_bits, &mut warnings)?;
     }

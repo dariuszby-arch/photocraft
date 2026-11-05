@@ -43,6 +43,7 @@ impl PhotocraftApp {
         }
         self.last_frame_time = now;
         self.sync_views();
+        crate::export_dialog::batch::tick(self, ctx);
         crate::type_font_preview::follow_hover(self, ctx);
         self.check_gpu(ctx);
         #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
@@ -308,6 +309,7 @@ impl PhotocraftApp {
         timeline_ui::windows(self, &ctx);
         workspace_ui::windows(self, &ctx);
         palette::show(self, &ctx);
+        crate::export_dialog::batch::show(self, &ctx);
         dialogs::show(self, &ctx);
         layers_panel_ui::show_dialog(self, &ctx);
         rasterize_prompt::run_pending(self, &ctx);

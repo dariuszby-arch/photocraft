@@ -204,6 +204,8 @@ pub struct DocWindow {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiState {
+    #[serde(default)]
+    pub batch_converter: crate::export_dialog::batch::State,
     pub tool: Tool,
     /// The last tool used in each shortcut group (the tools sharing a key, [`Tool::key`]), at most
     /// one per group: the group's key brings it back, as in Photoshop (#2608).
@@ -531,6 +533,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            batch_converter: Default::default(),
             tool: Tool::Move,
             group_tools: Vec::new(),
             spring: None,

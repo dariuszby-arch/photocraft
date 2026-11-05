@@ -22,6 +22,7 @@ pub mod exr_stream;
 mod fidelity;
 mod format;
 mod image;
+mod jxl_options;
 mod lab;
 mod options;
 pub mod orientation;
@@ -52,6 +53,7 @@ pub use crate::orientation::{exif_orientation, upright_exif, upright_xmp};
 pub use crate::resolution::{exif_resolution, export_exif, export_xmp, photoshop_resolution, xmp_resolution};
 pub use crate::source_settings::{WebpEncoding, jpeg_quality, webp_encoding};
 pub use half::f16;
+pub use jxl_options::{JxlEffort, JxlOptions};
 
 use crate::codecs::{dds, dicom, dpx, exr, fits, heif, iff, jpeg, jxl, pcx, png, pnm, tiff, via_image, webp, xpm};
 
@@ -83,6 +85,7 @@ pub fn decode_as_with(format: Format, bytes: &[u8], opts: &DecodeOptions) -> Res
         Format::Jpeg => jpeg::decode(bytes, l),
         Format::Tiff => tiff::decode(bytes, l),
         Format::WebP => webp::decode(bytes, l),
+        Format::Jxl => jxl::decode(bytes, l),
         Format::Pnm => pnm::decode(bytes, l),
         Format::Pcx => pcx::decode(bytes, l),
         Format::Xpm => xpm::decode(bytes, l),
@@ -94,7 +97,6 @@ pub fn decode_as_with(format: Format, bytes: &[u8], opts: &DecodeOptions) -> Res
         Format::Iff => iff::decode(bytes, l),
         Format::OpenExr => exr::decode(bytes, l),
         Format::Heif => heif::decode(bytes, l, opts.keep_orientation),
-        Format::Jxl => Err(CodecError::unsupported(format, "JPEG XL reading is not yet available; export is supported")),
         Format::Gif | Format::Bmp | Format::Tga | Format::Ico | Format::Qoi | Format::Hdr | Format::Avif => via_image::decode(format, bytes, l),
     }?;
     // Without a resolution of the format's own (PNG pHYs, TIFF tags, JPEG's metadata), the
@@ -109,7 +111,7 @@ pub fn decode_as_with(format: Format, bytes: &[u8], opts: &DecodeOptions) -> Res
     // on the way. HEIF keeps it in its container, and its decoder has already applied it.
     let o = match format {
         Format::Tiff => tiff::orientation(bytes, None),
-        Format::Heif => 1,
+        Format::Heif | Format::Jxl => 1,
         Format::Dpx => dpx::orientation(bytes),
         Format::Cineon => dpx::cineon_orientation(bytes),
         _ => img.meta.exif.as_deref().map_or(1, exif_orientation),
@@ -303,6 +305,7 @@ pub fn encode(image: &Image, format: Format, opts: &EncodeOptions) -> Result<Vec
         Format::Jpeg => jpeg::encode(image, plan, opts),
         Format::Tiff => tiff::encode(image, plan, opts),
         Format::WebP => webp::encode(image, plan, opts),
+        Format::Jxl => jxl::encode(image, plan, opts),
         Format::Pnm => pnm::encode(image, plan, opts),
         Format::Pcx => Err(CodecError::unsupported(format, "PCX is import-only; save as PNG instead")),
         Format::Xpm => Err(CodecError::unsupported(format, "XPM is import-only; save as PNG instead")),
@@ -314,7 +317,34 @@ pub fn encode(image: &Image, format: Format, opts: &EncodeOptions) -> Result<Vec
         Format::Iff => iff::encode(image, plan),
         Format::OpenExr => exr::encode(image, plan, opts),
         Format::Heif => Err(CodecError::unsupported(format, "encoding is not available in this build")),
-        Format::Jxl => jxl::encode(image, plan),
         Format::Gif | Format::Bmp | Format::Tga | Format::Ico | Format::Qoi | Format::Hdr | Format::Avif => via_image::encode(format, image, plan, opts),
+    }
+}
+
+/// Rebuild EXIF without GPS/location directories and MakerNotes that can contain a second GPS copy.
+/// Malformed data is dropped when privacy filtering was requested.
+pub fn exif_without_location(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut dirs = crate::codecs::tiff_exif::read(bytes)?;
+    dirs.gps.clear();
+    dirs.exif.retain(|f| !matches!(f.tag, 0x927c | 0xa214));
+    Some(crate::codecs::tiff_exif::block(&dirs))
+}
+
+/// ICC profile describing JPEG XL Rec.2020 PQ integer samples.
+pub fn jxl_hdr_profile() -> Result<Vec<u8>, String> {
+    #[cfg(feature = "jxl")]
+    {
+        use jxl_oxide::color::{ColourSpace, EnumColourEncoding, Primaries, RenderingIntent, TransferFunction, WhitePoint};
+        Ok(jxl_color::icc::colour_encoding_to_icc(&EnumColourEncoding {
+            colour_space: ColourSpace::Rgb,
+            white_point: WhitePoint::D65,
+            primaries: Primaries::Bt2100,
+            tf: TransferFunction::Pq,
+            rendering_intent: RenderingIntent::Relative,
+        }))
+    }
+    #[cfg(not(feature = "jxl"))]
+    {
+        Err("JPEG XL HDR is not enabled".into())
     }
 }
