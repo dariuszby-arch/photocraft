@@ -12,4 +12,4 @@ Windows: unzip and run photocraft.exe. Linux/MX 23: chmod +x the AppImage and la
 Binaries are unsigned. Verify SHA256SUMS.txt. This is not an official upstream release.
 The previous DW 1 release is retained.
 
-Build verification: the publication workflow checks both executables and performs a JPEG XL round trip before uploading assets. Download files only from the completed DW 2 release.
+EXIF interoperability: JPEG APP1 prefixes are removed before writing standard JPEG XL TIFF metadata boxes.

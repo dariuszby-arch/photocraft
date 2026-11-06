@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: photocraft-dw-0202-dw2-publication
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   windows:
@@ -210,6 +210,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          current_head=$(gh api "repos/$GH_REPO/commits/fix/dw-upstream-20261106" --jq .sha)
+          if [[ "$current_head" != "$GITHUB_SHA" ]]; then
+            echo "Refusing to publish an outdated source revision."
+            exit 1
+          fi
           tag="v0.20.2-dw2"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists. Refusing to overwrite published assets."

@@ -172,3 +172,16 @@ fn jpeg_xl_srgb_metadata_matches_output_and_respects_metadata_switch() {
     }
     assert_eq!(input.meta.exif.as_deref(), Some(exif.as_slice()), "source metadata stays unchanged");
 }
+
+/// JPEG APP1's Exif prefix must not precede the TIFF header inside a JXL box.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn jpeg_xl_prefixed_exif_is_written_as_raw_tiff() {
+    let tiff = b"II*\0\x08\0\0\0\0\0\0\0\0\0";
+    let mut input = Image::from_u8(2, 2, ChannelLayout::Rgb, vec![42; 12]).unwrap();
+    input.meta.exif = Some([b"Exif\0\0".as_slice(), tiff].concat());
+    let bytes = encode(&input, Format::Jxl, &EncodeOptions::default()).unwrap();
+    let decoder = jxl_oxide::JxlImage::builder().read(&bytes[..]).unwrap();
+    let jxl_oxide::AuxBoxData::Data(meta) = decoder.aux_boxes().first_exif().unwrap() else { panic!("missing EXIF") };
+    assert_eq!(meta.payload(), tiff);
+}

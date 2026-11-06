@@ -52,7 +52,7 @@ fn append_jxl_box(out: &mut Vec<u8>, name: &[u8; 4], payload: &[u8]) -> Result<(
 
 #[cfg(any(not(feature = "jxl"), target_arch = "wasm32", test))]
 pub(super) fn jxl_with_metadata(codestream: Vec<u8>, exif: Option<&[u8]>, xmp: Option<&str>) -> Result<Vec<u8>, CodecError> {
-    let exif = exif.filter(|b| !b.is_empty());
+    let exif = exif.map(crate::orientation::tiff_body).filter(|b| !b.is_empty());
     let xmp = xmp.filter(|s| !s.is_empty());
     if exif.is_none() && xmp.is_none() {
         return Ok(codestream);

@@ -209,7 +209,9 @@ mod encoder {
         }
         if opts.embed_metadata {
             if let Some(exif) = super::super::webp::export_exif(&img) {
-                config = config.with_exif(if srgb { crate::exif_color::srgb_exif_metadata(&exif).into_owned() } else { exif });
+                // JXL Exif boxes carry TIFF bytes, not JPEG APP1's Exif prefix.
+                let exif = crate::orientation::tiff_body(&exif);
+                config = config.with_exif(if srgb { crate::exif_color::srgb_exif_metadata(exif).into_owned() } else { exif.to_vec() });
             }
             if let Some(xmp) = &img.meta.xmp {
                 let xmp = if srgb { super::super::jxl_metadata::srgb_xmp_metadata(xmp) } else { std::borrow::Cow::Borrowed(xmp.as_str()) };
