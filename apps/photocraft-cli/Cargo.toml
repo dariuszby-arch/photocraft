@@ -13,6 +13,7 @@ default = ["gpu"]
 heif = ["photocraft-codecs/heif"]
 # Optional native GPU rendering backend, enabled by default in native CLI builds.
 gpu = ["photocraft-automation/gpu"]
+avif = ["photocraft-codecs/avif"]
 
 [lints]
 workspace = true

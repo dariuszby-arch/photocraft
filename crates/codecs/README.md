@@ -46,7 +46,7 @@ let out = encode(&img, Format::Tiff, &EncodeOptions::default())?;
 | OpenEXR | yes | yes | F16, F32 | Y, YA, RGB, RGBA | yes | no | no | no | no | no | no | `exr` |
 | Radiance HDR | yes | yes | F32 | RGB | no | no | no | no | no | no | yes (RGBE) | `image` |
 | FITS | yes | yes | U8, U16, F32 | Gray, RGB | no | no | no | no | no | yes (header cards) | no | built in |
-| JPEG XL (.jxl) | **no** (see #2868) | yes | U8, U16 | Gray, RGB, RGBA (GrayA expands to RGBA) | yes | no (bare codestream) | no | no | no | no | no | `zune-jpegxl` |
+| JPEG XL (.jxl) | yes (`jxl`) | yes | U8, U16 | RGB, RGBA (native; gray expanded); Gray in fallback | yes | yes (native lossless) | yes | yes | native | no | native option | `jxl-oxide` / `jixel`; `zune-jpegxl` fallback |
 | DPX | yes | yes | U8, U16 (10/12-bit code values read and written exactly through U16) | Gray, RGB, RGBA | yes | no | no | no | no | DPX header fields only (creator, project, copyright, creation time, transfer, colorimetric, frame position, frame rate, time code) | no | built in |
 | Cineon | yes | yes | U16 (10-bit code values read and written exactly through U16) | Gray, RGB | no | no | no | no | no | no | no | built in |
 | DICOM | yes | **no** | U8, U16 | Gray, RGB | no | no | no | no | no | no | n/a | built in |
@@ -74,16 +74,13 @@ embedded table (and a PNG's transparent entry) so `photocraft-io` can open them 
 
 ## Documented asymmetries and limitations
 
-* **JPEG XL export.** Writes lossless 8/16-bit bare codestreams with `zune-jpegxl`.
-  Native layouts are Gray, RGB and RGBA. GrayA is expanded to RGBA at the
-  original depth. For 16-bit RGBA (including expanded GrayA), we correct
-  zune-jpegxl 0.5.2's extra-channel header, which otherwise describes the
-  16-bit alpha samples as 8-bit. This preserves alpha precision; the independent
-  jxl-oxide decoder test checks the actual gray and alpha samples. The expansion
-  is not a native GrayA layout. No ICC, EXIF, XMP or DPI container boxes are written; the
-  document pipeline converts tagged images to sRGB and reports metadata loss.
-  Reading remains in the separate #2868 PR. The `ASYMMETRIC_EXCEPTIONS`
-  entry stays until import is merged.
+* **JPEG XL.** Native `jxl` builds support reading, lossless/lossy encoding,
+  quality, progressive and two supported effort modes (Fast and Normal).
+  Lossless output can preserve the source ICC; lossy SDR output uses sRGB.
+  EXIF/XMP colour declarations are reconciled for sRGB output; tagged lossless
+  output retains its source metadata. The fallback writer preserves 8/16-bit
+  samples and alpha and embeds optional EXIF/XMP boxes, but has no ICC support
+  or adjustable compression. Unsupported fallback options return an error.
 
 * **DDS.** The top mip level of a 2D texture: uncompressed pixels described by channel masks
   (8, 16, 24 or 32 bits, RGB or luminance, with or without alpha) or BC1/BC2/BC3 (DXT1/DXT3/DXT5),

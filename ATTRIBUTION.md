@@ -158,3 +158,11 @@ are adapted from Skyfuller1303’s MIT OR Apache-2.0 implementation in
 `897f20072762fdf0eb688adcdb8d8cda7b38ce66`. Don Omondi’s embedded AI/PDF/EPS
 extension and current-main integration build on that source. Clipboard and unrelated
 Shape Tools changes from that branch are not included.
+
+## DW JPEG XL integration
+
+| Path | Work | Author | Source | License |
+|---|---|---|---|---|
+| `crates/codecs/src/codecs/jxl.rs` | JPEG XL integration adapted from LightCraft | LightCraft contributors | https://github.com/storytold/lightcraft | MIT OR Apache-2.0; see `NOTICE-JXL.md` |
+| `third-party/jixel-0.3.4/` | jixel encoder notices | jixel contributors | https://crates.io/crates/jixel/0.3.4 | BSD-3-Clause OR Apache-2.0 |
+| `third-party/jxl-oxide-0.12.6/` | jxl-oxide decoder notices | jxl-oxide contributors | https://crates.io/crates/jxl-oxide/0.12.6 | MIT OR Apache-2.0 |

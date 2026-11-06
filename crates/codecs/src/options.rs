@@ -1,5 +1,6 @@
 //! Decode limits and encode options.
 
+use crate::JxlOptions;
 use crate::error::CodecError;
 use crate::image::{ChannelLayout, SampleType};
 
@@ -293,6 +294,8 @@ pub const TIFF_PYRAMID_MIN: u32 = 64;
 /// Options for [`crate::encode`].
 #[derive(Debug, Clone)]
 pub struct EncodeOptions {
+    /// JPEG XL compression, ported from LightCraft. Lossless by default.
+    pub jxl: JxlOptions,
     /// JPEG quality 1..=100 (also AVIF quality when enabled).
     pub jpeg_quality: u8,
     /// JPEG 4:2:0 chroma subsampling (`false` = 4:4:4).
@@ -333,6 +336,7 @@ pub struct EncodeOptions {
 impl Default for EncodeOptions {
     fn default() -> Self {
         EncodeOptions {
+            jxl: JxlOptions::default(),
             jpeg_quality: 90,
             jpeg_chroma_subsampling: true,
             jpeg_format: JpegFormat::Baseline,

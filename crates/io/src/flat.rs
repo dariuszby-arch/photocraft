@@ -1501,6 +1501,7 @@ pub fn export_flat_with_renderer(
                 ctl.progress(composite_share(format));
                 strip_xmp(&mut img.meta, opts);
                 let mut img = prepare_flat(img, format, &mut warnings)?;
+                img = prepare_jxl_output(img, format, opts, &mut warnings)?;
                 if format == Format::Tga {
                     img = tga_image(doc, img, opts.tga_bits, opts.preserve_alpha, &mut warnings)?;
                 }
@@ -1551,6 +1552,7 @@ pub fn export_flat_with_renderer(
     ctl.progress(composite_share(format));
     strip_xmp(&mut img.meta, opts);
     let mut img = prepare_flat(img, format, &mut warnings)?;
+    img = prepare_jxl_output(img, format, opts, &mut warnings)?;
     if format == Format::Tga {
         img = tga_image(doc, img, opts.tga_bits, opts.preserve_alpha, &mut warnings)?;
     }
@@ -1561,6 +1563,19 @@ pub fn export_flat_with_renderer(
         warnings.extend(crate::tiff_layers::flat_transparency_and_channels(doc, &mut img, opts.tiff_transparency, opts.preserve_alpha)?);
     }
     encode_image(&img, format, opts, warnings)
+}
+
+/// CPU and custom-renderer exports must prepare identical samples for JXL.
+fn prepare_jxl_output(mut img: Image, format: Format, opts: &ExportOptions, warnings: &mut Vec<String>) -> Result<Image, IoError> {
+    if format == Format::Jxl
+        && !opts.encode.jxl.hdr
+        && (!opts.encode.jxl.lossless || !opts.encode.embed_icc)
+        && let Some(srgb) = convert_rgb(&img, photocraft_cms::Builtin::Srgb.profile(), photocraft_cms::Intent::Perceptual, true, img.sample_type())?
+    {
+        img = srgb;
+        warnings.push("colours converted to sRGB for JPEG XL without a source ICC profile".into());
+    }
+    Ok(img)
 }
 
 /// Export As's Metadata: None drops the XMP packet, which lists the text of every type layer and

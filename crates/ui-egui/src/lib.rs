@@ -339,6 +339,8 @@ pub use widgets::tone;
 type InfoSampleKey = (i32, i32, u64, u32);
 
 pub struct PhotocraftApp {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) batch_converter_worker: Option<crate::export_dialog::batch::Worker>,
     pub session: Session,
     pub ui: UiState,
     pub services: Services,

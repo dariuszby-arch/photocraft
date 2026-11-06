@@ -12,6 +12,7 @@ pub(crate) mod heif;
 pub(crate) mod iff;
 pub(crate) mod jpeg;
 pub(crate) mod jxl;
+mod jxl_metadata;
 pub(crate) mod pcx;
 pub(crate) mod png;
 pub(crate) mod pnm;
@@ -23,3 +24,6 @@ pub(crate) mod via_image;
 pub(crate) mod vp8;
 pub(crate) mod webp;
 pub(crate) mod xpm;
+
+#[cfg(any(not(feature = "jxl"), target_arch = "wasm32"))]
+pub(crate) mod jxl_basic;

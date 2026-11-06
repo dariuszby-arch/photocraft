@@ -77,6 +77,8 @@ pub type ImportFn = Box<dyn Fn(&str, &[u8], &photocraft_io::ImportOptions) -> Re
 /// Encoder settings chosen in Export As (the file format comes from the name's extension).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportSettings {
+    /// JPEG XL settings; Save As is lossless, Export As also offers lossy quality.
+    pub jxl: photocraft_codecs::JxlOptions,
     /// JPEG quality 1–100 (None = codec default).
     pub jpeg_quality: Option<u8>,
     /// JPEG Options › Format Options: baseline, baseline optimized or progressive.
@@ -132,6 +134,7 @@ pub struct ExportSettings {
 impl Default for ExportSettings {
     fn default() -> Self {
         ExportSettings {
+            jxl: photocraft_codecs::JxlOptions::default(),
             jpeg_quality: None,
             jpeg_format: photocraft_codecs::JpegFormat::Baseline,
             webp_lossless: true,
@@ -160,6 +163,7 @@ impl ExportSettings {
     /// a profile or metadata choice cannot be applied in one and forgotten in the other.
     pub fn io_options(&self) -> photocraft_io::ExportOptions {
         let mut opts = photocraft_io::ExportOptions::default();
+        opts.encode.jxl = self.jxl;
         if let Some(q) = self.jpeg_quality {
             opts.encode.jpeg_quality = q;
         }

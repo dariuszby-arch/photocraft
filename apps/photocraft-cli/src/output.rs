@@ -20,6 +20,8 @@ impl From<&ExportArgs> for ExportOptions {
             // Asking for a quality asks for a lossy WebP; the default WebP stays lossless.
             o.encode.webp_quality = q;
             o.encode.webp_lossless = false;
+            o.encode.jxl.quality = q;
+            o.encode.jxl.lossless = false;
         }
         o.encode.dpx_bits = a.dpx_bits;
         if let Some(c) = a.tiff_compression {

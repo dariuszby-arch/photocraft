@@ -15,7 +15,7 @@ pub(crate) const BROWSE_FIELD: &str = "__browse";
 /// (`output`) folders of Image Processor, Batch, Lens Correction, Contact Sheet and Create
 /// Droplet, which Photoshop picks with Select Folder… / Choose… (#9357).
 pub(crate) fn is_folder_field(key: &str) -> bool {
-    matches!(key, "dir" | "input" | "output")
+    matches!(key, "dir" | "input" | "output" | "folder")
 }
 
 /// Browse… beside a path field of dialog `id`: a folder picker for folder fields
@@ -548,7 +548,9 @@ fn default_max_width(d: &Dialog, compact: bool, curves: bool, about_tabs: bool, 
         800.0
     } else if about_tabs {
         700.0
-    } else if d.kind == DialogKind::LayerStyle || d.fields.contains_key("__export") || crate::color_picker_ui::owns(&d.fields) {
+    } else if d.fields.contains_key("__export") {
+        available.clamp(720.0, 1120.0)
+    } else if d.kind == DialogKind::LayerStyle || crate::color_picker_ui::owns(&d.fields) {
         600.0
     } else if compact {
         260.0

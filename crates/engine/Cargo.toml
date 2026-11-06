@@ -12,6 +12,8 @@ workspace = true
 corpus = []
 
 [dependencies]
+web-time.workspace = true
+chrono.workspace = true
 photocraft-geom = { workspace = true }
 photocraft-color = { workspace = true }
 photocraft-cms = { workspace = true }
@@ -23,7 +25,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
-chrono = { workspace = true }
 photocraft-paint = { workspace = true }
 photocraft-algo = { workspace = true }
 photocraft-text = { workspace = true }

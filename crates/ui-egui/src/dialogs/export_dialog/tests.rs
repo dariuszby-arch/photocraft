@@ -39,6 +39,79 @@ fn default_poll_or_start_preview(
     super::poll_or_start_preview(ui, key, signature, doc, fields, profile)
 }
 
+#[test]
+#[ignore = "Manual offscreen visual QA; set PHOTOCRAFT_EXPORT_QA_PNG"]
+fn export_panel_visual_snapshot() {
+    let services = crate::Services {
+        export: Some(Box::new(|doc, path, settings| {
+            photocraft_io::export(doc, path, &settings.io_options()).map(|result| (result.bytes, result.warnings)).map_err(|e| e.to_string())
+        })),
+        ..Default::default()
+    };
+    let mut harness = egui_kittest::Harness::builder()
+        .with_accessibility_check(false)
+        .with_size(egui::vec2(1366.0, 768.0))
+        .with_pixels_per_point(1.0)
+        .with_max_steps(64)
+        .wgpu()
+        .build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+            app.run("file.new", json!({"width":960,"height":640,"background":"white"})).unwrap();
+            let id = open(&mut app).unwrap();
+            let fields = &mut app.ui.dialog_mut(id).unwrap().fields;
+            set_format_defaults(fields, "jxl", &Default::default());
+            fields.insert("lossless".into(), json!(false));
+            fields.insert("quality".into(), json!(75));
+            fields.insert("metadata".into(), json!("all"));
+            app
+        });
+    harness.run_steps(12);
+    if std::env::var_os("PHOTOCRAFT_EXPORT_QA_SCROLL").is_some() {
+        harness.event(egui::Event::PointerMoved(egui::pos2(450.0, 500.0)));
+        harness.event(egui::Event::MouseWheel {
+            source: egui::MouseWheelSource::Unknown,
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: egui::vec2(0.0, -900.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+        harness.run_steps(4);
+    }
+    let path = std::env::var("PHOTOCRAFT_EXPORT_QA_PNG").unwrap_or_else(|_| "export-panel.png".into());
+    harness.render().unwrap().save(path).unwrap();
+}
+
+#[test]
+fn jxl_export_defaults_are_lossless_and_quality_is_forwarded() {
+    let mut fields = Map::new();
+    set_format_defaults(&mut fields, "jxl", &Default::default());
+    assert!(valid_setting("format", &json!("jxl")));
+    assert!(settings(&fields).jxl.lossless);
+    assert_eq!(settings(&fields).io_options().encode.jxl.quality, 90);
+    fields.insert("lossless".into(), json!(false));
+    fields.insert("quality".into(), json!(72));
+    let opts = settings(&fields).io_options();
+    assert!(!opts.encode.jxl.lossless);
+    assert_eq!(opts.encode.jxl.quality, 72);
+}
+
+#[test]
+fn custom_dimensions_do_not_enlarge_or_round_the_preview_twice() {
+    let fields = json!({"format":"jxl","resizeMode":"custom","sizing":"pixels","width":26,"height":40,"dontEnlarge":true}).as_object().unwrap().clone();
+    let doc = Document::with_background(
+        "small",
+        photocraft_doc::Size::new(13, 20),
+        photocraft_doc::ColorMode::Rgb,
+        photocraft_doc::SampleType::U8,
+        photocraft_doc::Color::WHITE,
+    );
+    let exported = default_export_document(&doc, &fields, None).unwrap();
+    assert_eq!((exported.size.width, exported.size.height), (13, 20));
+    let preview = default_export_document(&doc, &fields, Some(8)).unwrap();
+    assert_eq!((preview.size.width, preview.size.height), (5, 8));
+}
+
 /// Export As reopens with the settings it was used with last (Preferences ▸ remembered
 /// dialog settings), and a value no control accepts keeps its default.
 #[test]
@@ -906,6 +979,20 @@ fn profile_and_metadata_follow_the_existing_exporter() {
     );
     doc.icc_profile = Some(Builtin::DisplayP3.profile().to_bytes());
     doc.metadata.xmp = Some("<x:xmpmeta>secret</x:xmpmeta>".into());
+    // EXIF must be copied to JPEG when the dialog selects Metadata: All.
+    let mut exif = b"II*\0\x08\0\0\0".to_vec();
+    exif.extend_from_slice(&2u16.to_le_bytes());
+    exif.extend_from_slice(&0x0112u16.to_le_bytes());
+    exif.extend_from_slice(&3u16.to_le_bytes());
+    exif.extend_from_slice(&1u32.to_le_bytes());
+    exif.extend_from_slice(&1u32.to_le_bytes());
+    exif.extend_from_slice(&0x010fu16.to_le_bytes());
+    exif.extend_from_slice(&2u16.to_le_bytes());
+    exif.extend_from_slice(&8u32.to_le_bytes());
+    exif.extend_from_slice(&38u32.to_le_bytes());
+    exif.extend_from_slice(&0u32.to_le_bytes());
+    exif.extend_from_slice(b"TestCam\0");
+    doc.metadata.exif = Some(std::sync::Arc::new(exif.clone()));
     let before = doc.clone();
     f.insert("profile".into(), json!("srgb"));
     f.insert("width".into(), json!(8));
@@ -918,11 +1005,20 @@ fn profile_and_metadata_follow_the_existing_exporter() {
     let stripped = photocraft_io::export(&converted, "out.jpg", &settings(&f).io_options()).unwrap().bytes;
     assert!(!stripped.windows(b"ICC_PROFILE".len()).any(|w| w == b"ICC_PROFILE"));
     assert!(!stripped.windows(b"secret".len()).any(|w| w == b"secret"));
+    assert!(photocraft_codecs::decode(&stripped).unwrap().meta.exif.is_none());
     f.insert("metadata".into(), json!("all"));
     f.insert("embedProfile".into(), json!(true));
-    let kept = photocraft_io::export(&converted, "out.jpg", &settings(&f).io_options()).unwrap().bytes;
-    assert!(kept.windows(b"ICC_PROFILE".len()).any(|w| w == b"ICC_PROFILE"));
-    assert!(kept.windows(b"secret".len()).any(|w| w == b"secret"));
+    for format in ["jpg", "jxl"] {
+        f.insert("format".into(), json!(format));
+        let converted = default_export_document(&doc, &f, None).unwrap();
+        let kept = photocraft_io::export(&converted, &format!("out.{format}"), &settings(&f).io_options()).unwrap().bytes;
+        let decoded = photocraft_codecs::decode(&kept).unwrap();
+        assert!(decoded.icc.is_some());
+        assert_eq!(decoded.meta.xmp.as_deref(), Some("<x:xmpmeta>secret</x:xmpmeta>"));
+        let camera = decoded.meta.exif.as_deref().unwrap();
+        assert!(camera.windows(8).any(|b| b == b"TestCam\0"));
+        assert_eq!(photocraft_codecs::exif_orientation(camera), 1);
+    }
     assert_eq!(doc, before);
 }
 
@@ -931,6 +1027,7 @@ fn applying_a_preset_restores_its_size_mode() {
     use photocraft_engine::export_preset_cmds::ExportPresetSettings;
 
     let pixels = ExportPresetSettings {
+        advanced: Default::default(),
         format: "png".into(),
         quality: 80,
         lossless: false,
@@ -959,4 +1056,97 @@ fn applying_a_preset_restores_its_size_mode() {
     assert_eq!(f.get("width"), Some(&json!(100.0)));
     assert_eq!(f.get("height"), Some(&json!(50.0)));
     assert_eq!(f.get("sizing"), Some(&json!("scale")));
+}
+
+#[test]
+fn full_panel_options_survive_reopening_and_presets() {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({"width":800,"height":600})).unwrap();
+    let id = open(&mut app).unwrap();
+    let mut fields = app.ui.dialog_mut(id).unwrap().fields.clone();
+    fields.extend(json!({"format":"jxl","lossless":false,"quality":64,"limitKb":400,"fullSize":false,"resizeMode":"longEdge","pixels":320,"resolution":240,"sharpen":"screen","removeLocation":true,"watermark":true,"watermarkText":"© Fotograf","watermarkOpacity":60,"filenameTemplate":"{name}_{width}","jxlEffort":"fast","jxlProgressive":true}).as_object().unwrap().clone());
+    remember(&mut app, &fields);
+    let reopened = open(&mut app).unwrap();
+    let actual = &app.ui.dialog_mut(reopened).unwrap().fields;
+    assert_eq!(advanced::read(actual).unwrap(), advanced::read(&fields).unwrap());
+    assert_eq!(export_pixels(800., 600., actual, None).unwrap(), (320., 240.));
+    let opts = settings(actual).io_options();
+    assert_eq!(opts.encode.jxl.quality, 64);
+    assert_eq!(opts.encode.jxl.effort, photocraft_codecs::JxlEffort::Fast);
+    assert!(opts.encode.jxl.progressive);
+    let saved = app.run("file.export.presets.save", json!({"name":"Panel test","settings":preset_settings(&fields)})).unwrap();
+    let preset: photocraft_engine::export_preset_cmds::ExportPresetSettings = serde_json::from_value(saved["preset"]["settings"].clone()).unwrap();
+    assert_eq!(preset.advanced, advanced::read(&fields).unwrap());
+}
+
+#[test]
+fn rendered_linear_dng_reopens_with_the_same_dimensions() {
+    let doc = checker_doc(photocraft_doc::SampleType::U16);
+    let bytes = linear_dng::encode(&doc).unwrap();
+    let raw = photocraft_raw::decode(&bytes, &Default::default()).unwrap();
+    assert_eq!((raw.width, raw.height), (5, 3));
+    let imported = photocraft_io::import("rendered.dng", &bytes).unwrap();
+    assert_eq!(imported.document.size, doc.size);
+}
+
+#[test]
+fn file_conflicts_and_original_copy_follow_panel_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.png");
+    let target = dir.path().join("copy.png");
+    std::fs::write(&source, b"original bytes, including metadata").unwrap();
+    std::fs::write(&target, b"existing").unwrap();
+    let mut f = json!({"conflict":"skip"}).as_object().unwrap().clone();
+    assert_eq!(advanced::conflict_path(&f, target.to_str().unwrap()).unwrap(), None);
+    f.insert("conflict".into(), json!("unique"));
+    assert_eq!(advanced::conflict_path(&f, target.to_str().unwrap()).unwrap().unwrap(), dir.path().join("copy-2.png").to_str().unwrap());
+    let services = crate::Services { write: Some(Box::new(|path, bytes| std::fs::write(path, bytes).map_err(|e| e.to_string()))), ..Default::default() };
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+    app.run("file.new", json!({"width":8,"height":8})).unwrap();
+    app.session.active_mut().unwrap().path = Some(source.to_str().unwrap().into());
+    let step = json!({"path":target.to_str().unwrap(),"format":"original","conflict":"overwrite"});
+    replay(&mut app, &step).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), std::fs::read(&source).unwrap());
+}
+
+#[test]
+fn jxl_size_limit_checks_encoded_bytes_and_reports_actual_quality() {
+    let mut doc = Document::with_background(
+        "noise",
+        photocraft_doc::Size::new(128, 128),
+        photocraft_doc::ColorMode::Rgb,
+        photocraft_doc::SampleType::U8,
+        photocraft_doc::Color::BLACK,
+    );
+    let bounds = doc.bounds();
+    let mut seed = 19u32;
+    let samples: Vec<f32> = (0..128 * 128)
+        .flat_map(|_| {
+            let mut p = [0.; 4];
+            for c in p.iter_mut().take(3) {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                *c = (seed >> 24) as f32 / 255.;
+            }
+            p[3] = 1.;
+            p
+        })
+        .collect();
+    doc.layers[0].surface_mut().unwrap().write_region(bounds, &samples);
+    let f = json!({"format":"jxl","quality":85,"lossless":false,"limitKb":4,"jxlEffort":"fast"}).as_object().unwrap().clone();
+    let result = advanced::encode(&doc, &f, "test.jxl", |d, p, s| {
+        photocraft_io::export(d, p, &s.io_options()).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
+    })
+    .unwrap();
+    assert!(result.bytes.len() <= 4096);
+    assert!(result.quality.unwrap() < 85);
+    let loaded = photocraft_io::import("test.jxl", &result.bytes).unwrap();
+    assert_eq!(loaded.document.size, doc.size);
+}
+
+#[test]
+fn filename_dimension_tags_use_output_dimensions() {
+    let doc = checker_doc(photocraft_doc::SampleType::U8);
+    let f =
+        json!({"format":"jxl","fullSize":false,"resizeMode":"longEdge","pixels":50,"filenameTemplate":"{name}_{width}x{height}"}).as_object().unwrap().clone();
+    assert_eq!(export_filename(&doc, &f, 1).unwrap(), "checker_50x30.jxl");
 }

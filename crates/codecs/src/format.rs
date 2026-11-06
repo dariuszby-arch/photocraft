@@ -34,7 +34,7 @@ pub enum Format {
     Fits,
     /// DPX (SMPTE 268M Digital Picture Exchange): luma, RGB or RGBA film and video frames.
     Dpx,
-    /// JPEG XL: lossless export-only until the separate importer lands.
+    /// JPEG XL: native lossless/lossy encode and decode with the default `jxl` feature.
     Jxl,
     /// Kodak Cineon (`.cin`, the 10-bit film-scan format DPX grew from).
     Cineon,
@@ -87,7 +87,8 @@ pub const ASYMMETRIC_EXCEPTIONS: &[(Format, &str)] = &[
         "AVIF encode uses ravif (pure Rust) but decoding requires dav1d (C); read stays unsupported \
          until a pure-Rust AV1 decoder is viable. Only enabled with the non-default `avif` feature.",
     ),
-    (Format::Jxl, "Lossless JPEG XL export uses the pure-Rust zune-jpegxl encoder; JPEG XL reading is tracked separately and is not yet available."),
+    #[cfg(not(feature = "jxl"))]
+    (Format::Jxl, "Without the jxl feature only the baseline lossless writer is enabled."),
     (
         Format::Heif,
         "HEIC decode uses heic-rs (pure Rust, in the optional photocraft-heif crate behind the \
@@ -284,7 +285,13 @@ pub fn caps(format: Format) -> FormatCaps {
         // `text`: the DPX header fields only (see `fidelity_warnings_with`).
         Format::Dpx => FormatCaps { depths: &[S::U8, S::U16], layouts: &[L::Gray, L::Rgb, L::Rgba], text: true, ..base },
         // GrayA is widened to RGBA at the same depth; the 16-bit alpha header is corrected.
-        Format::Jxl => FormatCaps { read: false, depths: &[S::U8, S::U16], layouts: &[L::Gray, L::Rgb, L::Rgba], ..base },
+        Format::Jxl => {
+            if cfg!(all(feature = "jxl", not(target_arch = "wasm32"))) {
+                FormatCaps { depths: &[S::U8, S::U16], icc: true, exif: true, xmp: true, dpi: true, animation: true, ..base }
+            } else {
+                FormatCaps { read: cfg!(feature = "jxl"), exif: true, xmp: true, depths: &[S::U8, S::U16], layouts: &[L::Gray, L::Rgb, L::Rgba], ..base }
+            }
+        }
         Format::Cineon => FormatCaps { depths: &[S::U16], layouts: &[L::Gray, L::Rgb], alpha: false, ..base },
         Format::Dicom => FormatCaps { read: true, write: false, depths: &[S::U8, S::U16], layouts: &[L::Gray, L::Rgb], alpha: false, ..base },
         Format::Iff => FormatCaps { depths: &[S::U8], layouts: &[L::Rgb, L::Rgba], alpha: true, ..base },

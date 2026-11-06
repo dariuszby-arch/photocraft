@@ -36,6 +36,8 @@ impl PhotocraftApp {
     pub fn new(mut session: Session, mut services: Services) -> Self {
         session.updates.check = services.check_updates.take();
         let mut app = Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            batch_converter_worker: None,
             session,
             ui: UiState::default(),
             services,
