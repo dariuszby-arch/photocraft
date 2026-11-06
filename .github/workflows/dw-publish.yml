@@ -1,0 +1,226 @@
+name: Publish PhotoCraft 0.20.2 DW 2 (Windows + Linux)
+
+on:
+  push:
+    branches:
+      - fix/dw-upstream-20261106
+    paths:
+      - '.github/workflows/dw-publish.yml'
+      - 'DW_RELEASE_NOTES_PUBLIC.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: photocraft-dw-0202-dw2-publication
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and test Windows x64 portable
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+      PHOTOCRAFT_REQUIRE_WINRES: "1"
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+      CRAFT_FONTS_REQUIRED: "1"
+    steps:
+      - name: Check out DW source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check out pinned fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: photocraft-dw-windows-x64
+      - name: Build PhotoCraft and CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:PHOTOCRAFT_BUILD_SHA = (git rev-parse HEAD).Trim()
+          $env:PHOTOCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+          cargo build --profile dw-release --locked --target x86_64-pc-windows-msvc -p photocraft -p photocraft-cli --features heif --bins
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+      - name: Verify binaries and package portable ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = 'target/x86_64-pc-windows-msvc/dw-release'
+          foreach ($name in @('photocraft.exe','photocraft-cli.exe')) {
+            $p = Join-Path $bin $name
+            if (-not (Test-Path $p)) { throw "Missing $p" }
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $p))
+            $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw "Non-x64 $name" }
+          }
+          & "$bin/photocraft-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLI smoke test failed' }
+          New-Item -ItemType Directory -Force 'out/smoke' | Out-Null
+          python -c "from pathlib import Path; Path('out/smoke/input.ppm').write_bytes(b'P6\n2 2\n255\n'+bytes([10,50,90])*4)"
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
+          & "$bin/photocraft-cli.exe" convert out/smoke/input.ppm out/smoke/output.jxl
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Windows JXL encoding failed' }
+          & "$bin/photocraft-cli.exe" convert out/smoke/output.jxl out/smoke/roundtrip.png
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Windows JXL decoding failed' }
+          $pkg = 'PhotoCraft_0.20.2_DW_2_Windows_x64_Portable'
+          $stage = Join-Path 'out' $pkg
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item (Join-Path $bin 'photocraft.exe'),(Join-Path $bin 'photocraft-cli.exe') $stage
+          Copy-Item 'packaging/windows/portable.txt' $stage
+          foreach ($f in @('DW_README_PL.md','DW_RELEASE_NOTES_PUBLIC.md','BATCH_CONVERTER_PL.md','JXL_README_PL.md','EXIF_FIX_README_PL.md','README.md','NOTICE','ATTRIBUTION.md','NOTICE-JXL.md','LICENSE','LICENSE-MIT','LICENSE-APACHE')) {
+            if (Test-Path $f) { Copy-Item $f $stage }
+          }
+          Get-ChildItem 'craft-fonts/fonts' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            $lic = Join-Path $_.FullName 'OFL.txt'
+            if (Test-Path $lic) { Copy-Item $lic (Join-Path $stage "OFL-$($_.Name).txt") }
+          }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path 'out' "$pkg.zip") -CompressionLevel Optimal -Force
+          $check='out/verify-portable'
+          Expand-Archive (Join-Path 'out' "$pkg.zip") $check -Force
+          foreach ($f in @('photocraft.exe','photocraft-cli.exe','portable.txt')) {
+            if (-not (Test-Path (Join-Path $check $f))) { throw "Missing $f inside ZIP" }
+          }
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-release-windows
+          path: out/PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Build and test Linux AppImage x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+      CRAFT_FONTS_REQUIRED: "1"
+      GITHUB_REPOSITORY: dariuszby-arch/photocraft
+    steps:
+      - name: Check out DW source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check out pinned fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+          persist-credentials: false
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev \
+            libgl1-mesa-dev libgtk-3-dev libasound2-dev libudev-dev \
+            libfontconfig1-dev libfreetype6-dev libssl-dev \
+            desktop-file-utils zsync file patchelf
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: photocraft-dw-linux-x64
+      - name: Build PhotoCraft, CLI and CLI docs
+        run: |
+          set -euo pipefail
+          PHOTOCRAFT_BUILD_SHA="$(git rev-parse HEAD)"
+          export PHOTOCRAFT_BUILD_SHA
+          PHOTOCRAFT_BUILD_DATE="$(date -u +%F)"
+          export PHOTOCRAFT_BUILD_DATE
+          cargo build --profile dw-release --locked -p photocraft -p photocraft-cli --features heif --bins
+          cargo build --profile dw-release --locked -p photocraft-cli --features heif --example man-and-completions
+          mkdir -p target/release/examples
+          cp target/dw-release/photocraft target/dw-release/photocraft-cli target/release/
+          cp target/dw-release/examples/man-and-completions target/release/examples/
+          target/release/photocraft-cli --version
+      - name: Package AppImage for MX Linux 23
+        run: |
+          set -euo pipefail
+          packaging/linux/package.sh --skip-build --formats "appimage"
+          test -s dist/release/photocraft-0.20.2-linux-x86_64.AppImage
+          mv dist/release/photocraft-0.20.2-linux-x86_64.AppImage \
+             dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
+          chmod +x dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage --cli --version
+      - name: Test packaged JPEG XL encoding and decoding
+        run: |
+          set -euo pipefail
+          mkdir -p out/smoke
+          python3 -c "from pathlib import Path; Path('out/smoke/input.ppm').write_bytes(b'P6\n2 2\n255\n'+bytes([10,50,90])*4)"
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage --cli convert out/smoke/input.ppm out/smoke/output.jxl
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage --cli convert out/smoke/output.jxl out/smoke/roundtrip.png
+          test -s out/smoke/roundtrip.png
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: dw-release-linux
+          path: dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish Windows + Linux release
+    needs: [windows, linux]
+    if: ${{ github.ref == 'refs/heads/fix/dw-upstream-20261106' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source and public release notes
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Download Windows ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: dw-release-windows
+          path: release-assets
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: dw-release-linux
+          path: release-assets
+      - name: Check files and generate SHA-256
+        run: |
+          set -euo pipefail
+          cd release-assets
+          test -s PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip
+          test -s PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
+          sha256sum PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip \
+                    PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Create public GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="v0.20.2-dw2"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists. Refusing to overwrite published assets."
+            exit 1
+          fi
+          gh release create "$tag" \
+            release-assets/PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip \
+            release-assets/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage \
+            release-assets/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" \
+            --title "PhotoCraft 0.20.2 DW 2 — JPEG XL + Batch Converter (Windows & Linux)" \
+            --notes-file DW_RELEASE_NOTES_PUBLIC.md \
+            --latest=false
+          gh release view "$tag" --json url --jq '.url'

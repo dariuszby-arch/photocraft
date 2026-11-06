@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/photocraft", "apps/photocraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.20.1"
+version = "0.20.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -111,6 +111,20 @@ opt-level = 0
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[profile.dw-release]
+inherits = "release"
+lto = false
+codegen-units = 64
+strip = "debuginfo"
+
+[profile.dw-release.package.photocraft-ui-egui]
+opt-level = 1
+codegen-units = 256
+
+[profile.dw-release.package.photocraft-engine]
+opt-level = 1
+codegen-units = 256
 
 # The browser build (apps/photocraft-web, `data-cargo-profile` in its index.html). Hosts cap the
 # size of a single file (Cloudflare Pages/Workers: 25 MiB), and the wasm is downloaded on every
