@@ -1,3 +1,53 @@
+# PhotoCraft DW — JPEG XL and Batch Converter
+
+**Unofficial community fork by Dariusz Wiśniewski (@dariuszby-arch).**
+PhotoCraft and its original implementation remain the work of the upstream
+authors and contributors. This fork adds community JPEG XL and export features.
+
+## Published DW release
+
+**[PhotoCraft 0.20.2 DW 2 — Windows and Linux](https://github.com/dariuszby-arch/photocraft/releases/tag/v0.20.2-dw2)**
+(published 6 November 2026).
+
+The release includes a Windows x64 portable ZIP, a Linux x86_64 AppImage for
+MX Linux 23-compatible systems, and SHA256SUMS.txt. GitHub also provides source
+archives for the release tag.
+
+- **JPEG XL:** read/write, lossless and lossy output, quality, Fast/Normal effort
+  and progressive encoding.
+- **Metadata:** EXIF/XMP during JPG ↔ JXL conversion, including metadata after
+  the image. Use **Metadata: All** and leave **Remove location info** off to
+  retain available location metadata.
+- **Batch Converter:** single files, multiple files or filtered folders,
+  optional subfolders, selection checkboxes, one output format for the entire
+  queue, an output folder, progress, cancellation and per-file results.
+- **DW 2 fixes:** EXIF/TIFF container interoperability, source ICC in lossless
+  JXL, P3 colour conversion without embedded ICC, and avoiding unnecessary
+  pixel conversion when source and output profiles match.
+
+**Menu:** File → Export → Batch Converter….
+
+[Polish guide](DW_README_PL.md) ·
+[Batch Converter](BATCH_CONVERTER_PL.md) ·
+[DW 2 release notes](DW_RELEASE_NOTES_PUBLIC.md) ·
+[Integration/test report](DW_INTEGRACJA_2026-11-06.md) ·
+[Community announcement draft](DW_ANNOUNCEMENT_EN.md)
+
+The published binaries were built from commit
+`9ddbcd336ef67516b5bc78c420e8098e3dacc412`.
+[The publication workflow succeeded](https://github.com/dariuszby-arch/photocraft/actions/runs/42202120639).
+This does not establish that all upstream tests passed or that the build was
+tested on every target computer. The integration report records the scope of
+the earlier targeted checks.
+
+This branch adds publication documentation to that release source. It does
+not change the published binaries. Installing an official upstream update
+replaces the DW extensions with the official build.
+
+---
+
+## Upstream PhotoCraft documentation
+
 <p align="center">
   <a href="https://getartcraft.com/">
     <picture>
