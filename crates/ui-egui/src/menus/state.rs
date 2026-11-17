@@ -6,6 +6,9 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     if id == "layer.selectUnderCursor" {
         return app.session.active().is_some() && app.drag.is_none() && app.brush_resize.is_none();
     }
+    if id == "file.export.batchConverter" {
+        return !cfg!(target_arch = "wasm32");
+    }
     if crate::tool_shortcuts::tool(id).is_some() {
         return true;
     }
