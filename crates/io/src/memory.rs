@@ -152,8 +152,9 @@ impl MemorySnapshot {
 }
 
 impl From<photocraft_raster::memory::system::SystemMemory> for MemorySnapshot {
-    /// The shared detector's measurement; an unreadable constraint is already the fail-closed
-    /// `Some(0)` available RAM, which admission refuses.
+    /// Keep the shared detector's distinction: an exposed but unreadable limit is guarded as
+    /// `Some(0)`, while an unexposed legacy memory controller is `None` (unknown), using the
+    /// existing native fallback. Lack of access to a controller is not a zero-RAM measurement.
     fn from(m: photocraft_raster::memory::system::SystemMemory) -> Self {
         Self { available_ram: m.available_ram, swap_free: m.swap_free, commit_headroom: m.commit_headroom }
     }
@@ -647,6 +648,29 @@ impl TestMemoryScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unexposed_cgmanager_memory_uses_native_unknown_policy() {
+        let snapshot = MemorySnapshot::from(photocraft_raster::memory::system::SystemMemory {
+            available_ram: None,
+            swap_free: None,
+            commit_headroom: None,
+            constraint_unreadable: true,
+        });
+        assert_eq!(snapshot.available_ram, None);
+        let budget = resolve_budget_for(Platform::Native, snapshot, None);
+        assert_eq!(budget.soft_limit, NATIVE_FALLBACK_BUDGET);
+        assert_eq!(budget.decide(79_598_444), BudgetDecision::Automatic, "the reported PSD fits the existing native fallback");
+        assert_ne!(budget.decide(NATIVE_FALLBACK_BUDGET + 1), BudgetDecision::Automatic, "larger imports still require approval or exceed the platform cap");
+
+        let zero = MemorySnapshot::from(photocraft_raster::memory::system::SystemMemory {
+            available_ram: Some(0),
+            swap_free: Some(0),
+            commit_headroom: None,
+            constraint_unreadable: true,
+        });
+        assert_eq!(resolve_budget_for(Platform::Native, zero, None).decide(79_598_444), BudgetDecision::Refused);
+    }
 
     #[test]
     fn an_import_that_does_not_fit_is_refused() {

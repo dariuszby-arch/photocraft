@@ -83,3 +83,19 @@ Podstawowy enkoder JXL z 0.20.2 pozostaje jako wariant bez domyślnej funkcji
 PhotoCraft oraz rozszerzenia pozostają na licencji MIT OR Apache-2.0. Mechanizm
 JXL pochodzi z LightCraft; zobacz `NOTICE-JXL.md` i `third-party/`.
 Program rozwijano z użyciem narzędzi wspomagających programowanie przez AI.
+
+## Naprawa importu PSD na MX Linux — PSD FIX3
+
+Poprawiono regresję, w której nieudostępniony kontroler pamięci cgroups v1 /
+cgmanager był uznawany za zero dostępnego RAM i blokował otwieranie prawidłowych
+PSD mimo dużej ilości wolnej pamięci. Użytkownik potwierdził działanie FIX3
+na rzeczywistym MX Linux z 32 GB RAM. JPEG XL, EXIF/XMP i konwerter są zachowane.
+
+- [Opis problemu do zgłoszenia](PSD_MEMORY_REGRESSION_PL.md)
+- [Przykładowy syntetyczny PSD, 18 warstw](examples/psd-memory/PSD_memory_regression_18_layers.psd?raw=true)
+- [Budowanie AppImage FIX3 i diagnostyka](PSD_FIX3_PL.md)
+
+```bash
+bash packaging/linux/buduj_DW_PSD_FIX3.sh
+```
+

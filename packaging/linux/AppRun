@@ -14,6 +14,11 @@ set -u
 APPDIR="$(dirname "$(readlink -f "$0")")"
 DESK_ID=ai.storyteller.photocraft
 
+# Read-only diagnostics use the same detector as native import admission.
+if [ "${1:-}" = --memory-report ]; then
+  exec "$APPDIR/usr/bin/photocraft-memory-report"
+fi
+
 # Select the bundled headless binary before desktop integration. In particular,
 # an MCP launch must leave stdio untouched and must not install a GUI launcher.
 if [ "${1:-}" = --cli ]; then

@@ -4,7 +4,8 @@
 //!
 //! - Linux: `/proc/meminfo` `MemAvailable`, capped by the process's memory cgroup (v2
 //!   `memory.max`/`memory.high` and v1 `memory.limit_in_bytes`/`memsw`, with every visible
-//!   ancestor); a cgroup that exists but cannot be read fails closed.
+//!   ancestor); an exposed but unreadable limit fails closed, while an unexposed legacy
+//!   controller makes the process capacity unknown (not zero).
 //! - Windows: `GlobalMemoryStatusEx` available physical memory and commit headroom.
 //! - macOS: the reclaimable pool from the VM counters (free, file-backed, purgeable).
 //! - Elsewhere (including the web): unknown.
@@ -21,9 +22,10 @@ pub struct SystemMemory {
     pub swap_free: Option<u64>,
     /// System or process commit headroom in bytes, if measurable.
     pub commit_headroom: Option<u64>,
-    /// A memory constraint exists but could not be read, so `available_ram` is the fail-closed
-    /// `Some(0)` rather than a measurement. Admission refuses on it; the tile residency budget
-    /// falls back to the host figure instead, because a zero budget would stall every operation.
+    /// The process's memory constraint could not be measured. An unmounted legacy controller
+    /// makes capacity unknown (`None`), using native admission's existing bounded automatic
+    /// fallback. An exposed but unreadable limit remains guarded as `Some(0)`. Tile residency
+    /// falls back to the host figure, because an artificial zero would stall every operation.
     pub constraint_unreadable: bool,
 }
 
@@ -97,6 +99,9 @@ pub(super) mod linux {
         /// A memory controller exists but its mount, path or limit could not be read. Callers
         /// must fail closed instead of falling back to unrestricted host memory.
         Unreadable,
+        /// Legacy membership advertises memory but the complete mount table exposes only
+        /// non-memory v1 hierarchies (as with cgmanager). The process limit is unknown, not zero.
+        Unexposed,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,8 +141,9 @@ pub(super) mod linux {
     }
 
     /// Measures available RAM and free swap from `/proc/meminfo`, capped by the process's memory
-    /// cgroup. Unreadable cgroup constraints fail closed as zero available memory rather than
-    /// falling back to unrestricted host memory.
+    /// cgroup. Exposed but unreadable limits fail closed as zero. A legacy memory hierarchy
+    /// not mounted in this namespace reports unknown capacity rather than unrestricted host
+    /// memory or a fabricated zero; admission already has a native unknown-memory policy.
     pub(super) fn snapshot() -> SystemMemory {
         snapshot_at(Path::new("/proc"), Path::new("/sys/fs/cgroup"))
     }
@@ -153,6 +159,12 @@ pub(super) mod linux {
             CgroupLimits::NotConstrained => (None, None),
             CgroupLimits::Limited { ram, swap } => (ram, swap),
             CgroupLimits::Unreadable => return SystemMemory { available_ram: Some(0), swap_free: Some(0), commit_headroom: None, constraint_unreadable: true },
+            CgroupLimits::Unexposed => {
+                // Host MemAvailable cannot establish a hidden process limit. Use the existing
+                // unknown-memory policy instead of claiming unlimited host RAM or zero RAM.
+                // A genuinely exhausted host remains exhausted regardless of controller access.
+                return SystemMemory { available_ram: host_ram.filter(|&ram| ram == 0), swap_free: None, commit_headroom: None, constraint_unreadable: true };
+            }
         };
 
         let available_ram = match (host_ram, cgroup_ram) {
@@ -192,22 +204,45 @@ pub(super) mod linux {
     ///
     /// v1 is preferred when the `memory` controller appears there; otherwise the unified v2
     /// hierarchy is used. A memory controller that cannot be resolved or read, or membership that
-    /// cannot be parsed, is [`CgroupLimits::Unreadable`], never host memory. Ancestors above a
+    /// cannot be parsed, is [`CgroupLimits::Unreadable`], never host memory. A legacy hierarchy
+    /// advertised by membership but not exposed by the complete mount table is instead
+    /// [`CgroupLimits::Unexposed`], preserving unknown versus zero. Ancestors above a
     /// cgroup namespace's root are not visible to an unprivileged reader (the kernel still
     /// enforces them), so only visible ancestors can be accounted for. The widest visible view of
     /// the hierarchy is used, not merely the deepest matching mount point.
     pub(super) fn cgroup_limits(proc_root: &Path, sys_root: &Path) -> CgroupLimits {
-        let Ok(groups) = std::fs::read_to_string(proc_root.join("self/cgroup")) else {
-            // Without membership we cannot prove that no memory cgroup applies.
-            return CgroupLimits::Unreadable;
+        let mountinfo = std::fs::read_to_string(proc_root.join("self/mountinfo")).ok();
+        let unmounted = sys_root_absent_or_empty(sys_root) && mountinfo.as_deref().is_some_and(lists_mounts_without_cgroup);
+        let groups = match std::fs::read_to_string(proc_root.join("self/cgroup")) {
+            Ok(groups) => groups,
+            // Kernels without cgroup support have no membership file. Permission and other
+            // I/O errors remain guarded, and absence alone never discards a mounted limit.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && unmounted => return CgroupLimits::NotConstrained,
+            Err(_) => return CgroupLimits::Unreadable,
         };
+
+        // Linux can expose an empty membership file before any hierarchy has been mounted,
+        // notably on SysV-init desktops. It is not a failed memory measurement. Require the
+        // independent mount evidence before accepting it; malformed non-empty data still fails.
+        if groups.is_empty() && unmounted {
+            return CgroupLimits::NotConstrained;
+        }
         let membership = match parse_membership(&groups) {
             MembershipParse::Parsed(membership) => membership,
             MembershipParse::Malformed => return CgroupLimits::Unreadable,
         };
-        let mountinfo = std::fs::read_to_string(proc_root.join("self/mountinfo")).ok();
+
+        // Some sandboxes expose cgroup membership but no mounted cgroup interface. An absent
+        // or empty mount point plus a fully parsed list with no cgroup mounts is not zero RAM.
+        // Keep real, hidden, or unreadable limits fail-closed.
+        if unmounted {
+            return CgroupLimits::NotConstrained;
+        }
 
         if let Some(path) = membership.v1_memory {
+            if mountinfo.as_deref().is_some_and(legacy_memory_controller_unexposed) {
+                return CgroupLimits::Unexposed;
+            }
             let Some(dir) = resolve_dir(sys_root, mountinfo.as_deref(), path, "cgroup", Some("memory")) else {
                 return CgroupLimits::Unreadable;
             };
@@ -263,6 +298,14 @@ pub(super) mod linux {
         MembershipParse::Parsed(membership)
     }
 
+    /// An absent or readable empty mount point; permission and non-directory errors stay guarded.
+    fn sys_root_absent_or_empty(sys_root: &Path) -> bool {
+        match std::fs::metadata(sys_root) {
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+            Ok(meta) => meta.is_dir() && std::fs::read_dir(sys_root).is_ok_and(|mut entries| entries.next().is_none()),
+        }
+    }
+
     /// Parses `/proc/self/mountinfo` into the mount fields used to locate a cgroup hierarchy.
     ///
     /// Malformed lines are skipped; callers fail closed when no matching mount is found.
@@ -271,8 +314,15 @@ pub(super) mod linux {
         for line in text.lines() {
             let fields: Vec<&str> = line.split_whitespace().collect();
             let Some(separator) = fields.iter().position(|f| *f == "-") else { continue };
+            let super_options = fields.get(separator + 3).copied().or_else(|| {
+                // Kernel mount sources can be empty, leaving two spaces after the filesystem.
+                // A single-space truncated line must still be rejected.
+                let after = line.split_once(" - ")?.1.trim_start();
+                let fstype = fields.get(separator + 1).copied()?;
+                after.strip_prefix(fstype)?.starts_with("  ").then(|| fields.get(separator + 2).copied()).flatten()
+            });
             let (Some(root), Some(point), Some(fstype), Some(super_options)) =
-                (fields.get(3).copied(), fields.get(4).copied(), fields.get(separator + 1).copied(), fields.get(separator + 3).copied())
+                (fields.get(3).copied(), fields.get(4).copied(), fields.get(separator + 1).copied(), super_options)
             else {
                 continue;
             };
@@ -286,6 +336,26 @@ pub(super) mod linux {
             });
         }
         mounts
+    }
+
+    /// Only a complete non-empty list can establish that no cgroup filesystem is mounted.
+    fn lists_mounts_without_cgroup(info: &str) -> bool {
+        let mounts = parse_mountinfo(info);
+        let lines = info.lines().filter(|line| !line.trim().is_empty()).count();
+        !mounts.is_empty() && mounts.len() == lines && !mounts.iter().any(|mount| mount.fstype == "cgroup" || mount.fstype == "cgroup2")
+    }
+
+    /// A complete legacy mount view can expose only name=systemd, cpu, etc. even though
+    /// membership names a separate memory hierarchy managed in cgmanager's mount namespace.
+    /// Any visible memory or v2 interface, and incomplete metadata, keep the strict path.
+    fn legacy_memory_controller_unexposed(info: &str) -> bool {
+        let mounts = parse_mountinfo(info);
+        let lines = info.lines().filter(|line| !line.trim().is_empty()).count();
+        mounts.len() == lines
+            && mounts.iter().any(|mount| mount.fstype == "cgroup")
+            && !mounts.iter().any(|mount| {
+                mount.fstype == "cgroup2" || (mount.fstype == "cgroup" && (has_option(&mount.options, "memory") || has_option(&mount.super_options, "memory")))
+            })
     }
 
     /// Finds the mount for `fstype`/`controller` and joins the process's cgroup path to it.
@@ -842,6 +912,155 @@ mod tests {
         assert_eq!(linux::meminfo(info, "SwapFree:"), Some(1024 * 1024));
         assert_eq!(linux::meminfo(info, "Missing:"), None);
         assert_eq!(linux::meminfo("MemAvailable: lots kB", "MemAvailable:"), None);
+    }
+
+    /// Actual MX/cgmanager report: all v1 memberships exist but only name=systemd is mounted.
+    /// The memory limit cannot be queried here; it is unknown, not a measurement of zero RAM.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_cgmanager_unmounted_memory_is_unknown() {
+        let (proc, sys) = fixture("dw-mx-cgmanager");
+        write(
+            &proc.join("self/cgroup"),
+            "15:name=systemd:/user.slice/user-1000.slice/session-1.scope\n8:memory:/user.slice/user-1000.slice/session-1.scope\n2:cpu:/user.slice/user-1000.slice/session-1.scope\n",
+        );
+        std::fs::create_dir_all(sys.join("systemd")).unwrap();
+        write(
+            &proc.join("self/mountinfo"),
+            &format!(
+                "25 20 0:23 / /proc rw - proc proc rw\n43 40 0:48 / {} rw,nosuid,nodev,noexec,relatime - cgroup systemd rw,favordynmods,release_agent=/run/cgmanager/agents/cgm-release-agent.systemd,name=systemd\n",
+                sys.join("systemd").display()
+            ),
+        );
+        write(&proc.join("meminfo"), "MemTotal: 32754536 kB\nMemAvailable: 20800996 kB\nSwapTotal: 2097148 kB\nSwapFree: 2097148 kB\n");
+        let snapshot = linux::snapshot_at(&proc, &sys);
+        assert_eq!(snapshot.available_ram, None, "unexposed process limit is unknown, not Some(0)");
+        assert!(snapshot.constraint_unreadable);
+        assert_eq!(linux::available_at(&proc, &sys), None, "host swap must not invent process headroom");
+        write(&proc.join("meminfo"), "MemAvailable: 0 kB\nSwapFree: 0 kB\n");
+        assert_eq!(linux::snapshot_at(&proc, &sys).available_ram, Some(0), "a genuine zero remains zero");
+        std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_cgmanager_fallback_never_hides_a_visible_memory_mount() {
+        for (name, mount) in [
+            ("dw-mx-visible-v1", "30 20 0:26 / /missing-memory rw - cgroup memory rw,memory\n"),
+            ("dw-mx-visible-v2", "30 20 0:26 / /missing-unified rw - cgroup2 cgroup2 rw\n"),
+            ("dw-mx-truncated-mount", "30 20 0:26 / /missing-memory rw - cgroup\n"),
+        ] {
+            let (proc, sys) = fixture(name);
+            write(&proc.join("self/cgroup"), "8:memory:/user.slice/user-1000.slice/session-1.scope\n");
+            std::fs::create_dir_all(sys.join("systemd")).unwrap();
+            write(&proc.join("self/mountinfo"), &format!("43 40 0:48 / {} rw - cgroup systemd rw,name=systemd\n{mount}", sys.join("systemd").display()));
+            assert_eq!(linux::cgroup_limits(&proc, &sys), linux::CgroupLimits::Unreadable, "{name}");
+            std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
+        }
+    }
+
+    /// SysV-init machines can legitimately have no active hierarchy: /proc/self/cgroup is
+    /// empty, or absent when the kernel has no cgroup support. FIX1 rejected both before it
+    /// reached its unmounted-hierarchy check, falsely reporting zero available RAM.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_no_active_hierarchy_uses_host_memory() {
+        for (name, membership_exists, sys_exists) in [
+            ("dw-empty-membership-empty-sys", true, true),
+            ("dw-empty-membership-no-sys", true, false),
+            ("dw-no-membership-empty-sys", false, true),
+            ("dw-no-membership-no-sys", false, false),
+        ] {
+            let (proc, sys) = fixture(name);
+            if membership_exists {
+                write(&proc.join("self/cgroup"), "");
+            }
+            if !sys_exists {
+                std::fs::remove_dir(&sys).unwrap();
+            }
+            write(&proc.join("self/mountinfo"), "25 20 0:23 / /proc rw - proc proc rw\n26 20 0:24 / /tmp rw - tmpfs  rw\n");
+            write(&proc.join("meminfo"), "MemAvailable: 12582912 kB\nSwapFree: 0 kB\n");
+            let snapshot = linux::snapshot_at(&proc, &sys);
+            assert_eq!(snapshot.available_ram, Some(12 << 30), "{name}");
+            assert_eq!(snapshot.swap_free, Some(0), "{name}");
+            assert!(!snapshot.constraint_unreadable, "{name}");
+            std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_empty_membership_fallback_requires_unmounted_hierarchy() {
+        for (name, mountinfo) in [
+            ("dw-empty-no-mountinfo", None),
+            ("dw-empty-truncated-mountinfo", Some("25 20 0:23 / /proc rw - proc proc rw\ntruncated\n")),
+            ("dw-empty-hidden-v2", Some("30 20 0:26 / /other-cgroup rw - cgroup2 cgroup2 rw\n")),
+            ("dw-empty-hidden-v1", Some("30 20 0:26 / /other-cgroup rw - cgroup cgroup rw,memory\n")),
+        ] {
+            let (proc, sys) = fixture(name);
+            write(&proc.join("self/cgroup"), "");
+            if let Some(info) = mountinfo {
+                write(&proc.join("self/mountinfo"), info);
+            }
+            assert_eq!(linux::cgroup_limits(&proc, &sys), linux::CgroupLimits::Unreadable, "{name}");
+            std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
+        }
+    }
+
+    /// A visible membership without a mounted cgroup interface is not a zero-RAM machine.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_unmounted_cgroup_uses_host_memory() {
+        for (name, membership, absent) in [
+            ("dw-unmounted-v2", "0::/app\n", true),
+            ("dw-empty-v2", "0::/app\n", false),
+            ("dw-unmounted-v1", "4:memory:/app\n", true),
+            ("dw-empty-v1", "4:memory:/app\n", false),
+        ] {
+            let (proc, sys) = fixture(name);
+            write(&proc.join("self/cgroup"), membership);
+            // Empty mount sources are valid in bubblewrap-style sandboxes.
+            write(&proc.join("self/mountinfo"), "25 20 0:23 / /proc rw - proc proc rw\n26 20 0:24 / /tmp rw - tmpfs  rw\n");
+            write(&proc.join("meminfo"), "MemAvailable: 12582912 kB\nSwapFree: 0 kB\n");
+            if absent {
+                std::fs::remove_dir(&sys).unwrap();
+            }
+            let snapshot = linux::snapshot_at(&proc, &sys);
+            assert_eq!(snapshot.available_ram, Some(12 << 30), "{name}");
+            assert_eq!(snapshot.swap_free, Some(0), "{name}");
+            assert!(!snapshot.constraint_unreadable, "{name}");
+            std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_unmounted_cgroup_fallback_needs_complete_evidence() {
+        let cases = [
+            ("dw-no-mountinfo", None),
+            ("dw-empty-mountinfo", Some("")),
+            ("dw-malformed-mountinfo", Some("not mountinfo\n")),
+            ("dw-partial-mountinfo", Some("25 20 0:23 / /proc rw - proc proc rw\n30 20 0:26 / /sys/fs/cgroup rw - cgroup2\n")),
+            ("dw-hidden-v2", Some("30 20 0:26 / /other-cgroup rw - cgroup2 cgroup2 rw\n")),
+            ("dw-hidden-v2-empty-source", Some("30 20 0:26 / /other-cgroup rw - cgroup2  rw\n")),
+            ("dw-hidden-v1", Some("30 20 0:26 / /other-cgroup rw - cgroup cgroup rw,memory\n")),
+        ];
+        for (name, mountinfo) in cases {
+            let (proc, sys) = fixture(name);
+            write(&proc.join("self/cgroup"), "0::/app\n");
+            if let Some(text) = mountinfo {
+                write(&proc.join("self/mountinfo"), text);
+            }
+            assert_eq!(linux::cgroup_limits(&proc, &sys), linux::CgroupLimits::Unreadable, "{name}");
+            std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
+        }
+
+        let (proc, sys) = fixture("dw-nonempty-cgroup");
+        write(&proc.join("self/cgroup"), "0::/app\n");
+        write(&proc.join("self/mountinfo"), "25 20 0:23 / /proc rw - proc proc rw\n");
+        write(&sys.join("memory.max"), "1073741824\n");
+        assert_eq!(linux::cgroup_limits(&proc, &sys), linux::CgroupLimits::Unreadable);
+        std::fs::remove_dir_all(proc.parent().unwrap()).unwrap();
     }
 
     #[cfg(target_os = "linux")]
