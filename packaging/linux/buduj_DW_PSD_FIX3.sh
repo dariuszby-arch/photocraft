@@ -3,8 +3,8 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
-export PHOTOCRAFT_VERSION=0.20.2-DW-PSD-FIX3
-export PHOTOCRAFT_OVERRIDE_VERSION="$PHOTOCRAFT_VERSION"
+export PHOTOCRAFT_VERSION="${PHOTOCRAFT_VERSION:-0.20.2-DW-PSD-FIX3}"
+export PHOTOCRAFT_OVERRIDE_VERSION="${PHOTOCRAFT_OVERRIDE_VERSION:-$PHOTOCRAFT_VERSION}"
 export PHOTOCRAFT_BUILD_SHA="${PHOTOCRAFT_BUILD_SHA:-$(git rev-parse HEAD 2>/dev/null || printf '%s' '9ddbcd336ef67516b5bc78c420e8098e3dacc412')}"
 export PHOTOCRAFT_BUILD_DATE="${PHOTOCRAFT_BUILD_DATE:-$(date -u +%F)}"
 export GITHUB_REPOSITORY=dariuszby-arch/photocraft
@@ -43,7 +43,7 @@ cp packaging/linux/ai.storyteller.photocraft.desktop "$appdir/"
 cp assets/app-icon/hicolor/256x256/apps/ai.storyteller.photocraft.png "$appdir/"
 ln -s ai.storyteller.photocraft.png "$appdir/.DirIcon"
 docs="$appdir/usr/share/doc/photocraft"
-cp PSD_FIX3_PL.md NOTICE-JXL.md DW_README_PL.md BATCH_CONVERTER_PL.md JXL_README_PL.md "$docs/"
+cp PSD_FIX3_PL.md PSD_MEMORY_REGRESSION_PL.md DW_RELEASE_NOTES_PUBLIC.md NOTICE-JXL.md DW_README_PL.md BATCH_CONVERTER_PL.md JXL_README_PL.md "$docs/"
 cp -a third-party/lightcraft "$docs/lightcraft"
 tool="$CARGO_TARGET_DIR/appimagetool-1.9.1-x86_64.AppImage"
 runtime="$CARGO_TARGET_DIR/type2-runtime-20251108-x86_64"
@@ -53,3 +53,4 @@ output="$DIST/PhotoCraft_0.20.2_DW_PSD_FIX3_MX23-x86_64.AppImage"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --no-appstream --runtime-file "$runtime" "$appdir" "$output"
 APPIMAGE_EXTRACT_AND_RUN=1 "$output" --cli --version
 echo "Gotowe: $output"
+

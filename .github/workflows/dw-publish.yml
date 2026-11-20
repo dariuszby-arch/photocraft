@@ -1,4 +1,4 @@
-name: Publish PhotoCraft 0.20.2 DW 2 (Windows + Linux)
+name: Publish PhotoCraft 0.20.2 DW 3 (Windows + Linux)
 
 on:
   push:
@@ -13,8 +13,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: photocraft-dw-0202-dw2-publication
+  group: photocraft-dw-0202-dw3-publication
   cancel-in-progress: true
+
+env:
+  PHOTOCRAFT_VERSION: 0.20.2-DW3
+  PHOTOCRAFT_OVERRIDE_VERSION: 0.20.2-DW3
+  CARGO_BUILD_JOBS: "2"
 
 jobs:
   windows:
@@ -67,8 +72,9 @@ jobs:
             $pe = [BitConverter]::ToInt32($bytes, 0x3c)
             if ([BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) { throw "Non-x64 $name" }
           }
-          & "$bin/photocraft-cli.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw 'CLI smoke test failed' }
+          $version = (& "$bin/photocraft-cli.exe" --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '0\.20\.2-DW3') { throw 'Incorrect Windows release version' }
+          Write-Host $version
           New-Item -ItemType Directory -Force 'out/smoke' | Out-Null
           python -c "from pathlib import Path; Path('out/smoke/input.ppm').write_bytes(b'P6\n2 2\n255\n'+bytes([10,50,90])*4)"
           if ($LASTEXITCODE -ne 0) { throw 'Fixture generation failed' }
@@ -76,12 +82,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Packaged Windows JXL encoding failed' }
           & "$bin/photocraft-cli.exe" convert out/smoke/output.jxl out/smoke/roundtrip.png
           if ($LASTEXITCODE -ne 0) { throw 'Packaged Windows JXL decoding failed' }
-          $pkg = 'PhotoCraft_0.20.2_DW_2_Windows_x64_Portable'
+          $psdInfo = (& "$bin/photocraft-cli.exe" info --compact examples/psd-memory/PSD_memory_regression_18_layers.psd | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw 'Windows PSD import failed' }
+          $psd = $psdInfo | ConvertFrom-Json
+          if ($psd.width -ne 1491 -or $psd.height -ne 1055 -or $psd.layers.Count -ne 18) { throw 'Incorrect imported PSD structure' }
+          $pkg = 'PhotoCraft_0.20.2_DW_3_Windows_x64_Portable'
           $stage = Join-Path 'out' $pkg
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item (Join-Path $bin 'photocraft.exe'),(Join-Path $bin 'photocraft-cli.exe') $stage
           Copy-Item 'packaging/windows/portable.txt' $stage
-          foreach ($f in @('DW_README_PL.md','DW_RELEASE_NOTES_PUBLIC.md','BATCH_CONVERTER_PL.md','JXL_README_PL.md','EXIF_FIX_README_PL.md','README.md','NOTICE','ATTRIBUTION.md','NOTICE-JXL.md','LICENSE','LICENSE-MIT','LICENSE-APACHE')) {
+          foreach ($f in @('DW_README_PL.md','DW_RELEASE_NOTES_PUBLIC.md','PSD_FIX3_PL.md','PSD_MEMORY_REGRESSION_PL.md','BATCH_CONVERTER_PL.md','JXL_README_PL.md','EXIF_FIX_README_PL.md','README.md','NOTICE','ATTRIBUTION.md','NOTICE-JXL.md','LICENSE','LICENSE-MIT','LICENSE-APACHE')) {
             if (Test-Path $f) { Copy-Item $f $stage }
           }
           Get-ChildItem 'craft-fonts/fonts' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
@@ -94,11 +104,13 @@ jobs:
           foreach ($f in @('photocraft.exe','photocraft-cli.exe','portable.txt')) {
             if (-not (Test-Path (Join-Path $check $f))) { throw "Missing $f inside ZIP" }
           }
+          $packedVersion = (& "$check/photocraft-cli.exe" --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $packedVersion -notmatch '0\.20\.2-DW3') { throw 'Portable ZIP smoke test failed' }
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
           name: dw-release-windows
-          path: out/PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip
+          path: out/PhotoCraft_0.20.2_DW_3_Windows_x64_Portable.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -146,6 +158,8 @@ jobs:
           export PHOTOCRAFT_BUILD_DATE
           cargo build --profile dw-release --locked -p photocraft -p photocraft-cli --features heif --bins
           cargo build --profile dw-release --locked -p photocraft-cli --features heif --example man-and-completions
+          cargo build --profile dw-release --locked -p photocraft-raster --example system_memory_report
+          cargo test --profile dw-release --locked -p photocraft-raster --lib memory::system::tests -- --test-threads=1
           mkdir -p target/release/examples
           cp target/dw-release/photocraft target/dw-release/photocraft-cli target/release/
           cp target/dw-release/examples/man-and-completions target/release/examples/
@@ -153,25 +167,30 @@ jobs:
       - name: Package AppImage for MX Linux 23
         run: |
           set -euo pipefail
-          packaging/linux/package.sh --skip-build --formats "appimage"
-          test -s dist/release/photocraft-0.20.2-linux-x86_64.AppImage
-          mv dist/release/photocraft-0.20.2-linux-x86_64.AppImage \
-             dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
-          chmod +x dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
-          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage --cli --version
+          bash packaging/linux/buduj_DW_PSD_FIX3.sh --skip-build
+          test -s dist/release/PhotoCraft_0.20.2_DW_PSD_FIX3_MX23-x86_64.AppImage
+          mv dist/release/PhotoCraft_0.20.2_DW_PSD_FIX3_MX23-x86_64.AppImage \
+             dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage
+          chmod +x dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage
+          version=$(APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage --cli --version)
+          echo "$version"
+          [[ "$version" == *"0.20.2-DW3"* ]]
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage --memory-report
       - name: Test packaged JPEG XL encoding and decoding
         run: |
           set -euo pipefail
           mkdir -p out/smoke
           python3 -c "from pathlib import Path; Path('out/smoke/input.ppm').write_bytes(b'P6\n2 2\n255\n'+bytes([10,50,90])*4)"
-          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage --cli convert out/smoke/input.ppm out/smoke/output.jxl
-          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage --cli convert out/smoke/output.jxl out/smoke/roundtrip.png
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage --cli convert out/smoke/input.ppm out/smoke/output.jxl
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage --cli convert out/smoke/output.jxl out/smoke/roundtrip.png
           test -s out/smoke/roundtrip.png
+          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage --cli info --compact examples/psd-memory/PSD_memory_regression_18_layers.psd > out/smoke/psd-info.json
+          python3 -c "import json; from pathlib import Path; d=json.loads(Path('out/smoke/psd-info.json').read_text()); assert (d['width'], d['height'], len(d['layers'])) == (1491, 1055, 18)"
       - name: Upload Linux AppImage
         uses: actions/upload-artifact@v4
         with:
           name: dw-release-linux
-          path: dist/release/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
+          path: dist/release/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage
           if-no-files-found: error
           retention-days: 30
 
@@ -198,11 +217,13 @@ jobs:
       - name: Check files and generate SHA-256
         run: |
           set -euo pipefail
+          cp examples/psd-memory/PSD_memory_regression_18_layers.psd release-assets/
           cd release-assets
-          test -s PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip
-          test -s PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage
-          sha256sum PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip \
-                    PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage > SHA256SUMS.txt
+          test -s PhotoCraft_0.20.2_DW_3_Windows_x64_Portable.zip
+          test -s PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage
+          sha256sum PhotoCraft_0.20.2_DW_3_Windows_x64_Portable.zip \
+                    PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage \
+                    PSD_memory_regression_18_layers.psd > SHA256SUMS.txt
           cat SHA256SUMS.txt
       - name: Create public GitHub Release
         env:
@@ -215,17 +236,19 @@ jobs:
             echo "Refusing to publish an outdated source revision."
             exit 1
           fi
-          tag="v0.20.2-dw2"
+          tag="v0.20.2-dw3"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "Release $tag already exists. Refusing to overwrite published assets."
             exit 1
           fi
           gh release create "$tag" \
-            release-assets/PhotoCraft_0.20.2_DW_2_Windows_x64_Portable.zip \
-            release-assets/PhotoCraft_0.20.2_DW_2_MX23-x86_64.AppImage \
+            release-assets/PhotoCraft_0.20.2_DW_3_Windows_x64_Portable.zip \
+            release-assets/PhotoCraft_0.20.2_DW_3_MX23-x86_64.AppImage \
+            release-assets/PSD_memory_regression_18_layers.psd \
             release-assets/SHA256SUMS.txt \
             --target "$GITHUB_SHA" \
-            --title "PhotoCraft 0.20.2 DW 2 — JPEG XL + Batch Converter (Windows & Linux)" \
+            --title "PhotoCraft 0.20.2 DW 3 — PSD FIX3 + JPEG XL (Windows & Linux)" \
             --notes-file DW_RELEASE_NOTES_PUBLIC.md \
-            --latest=false
+            --latest
           gh release view "$tag" --json url --jq '.url'
+
