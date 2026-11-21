@@ -1,8 +1,11 @@
-# PhotoCraft 0.20.2 — rozszerzenia Dariusza Wiśniewskiego
+# PhotoCraft 0.20.2 DW 4 — rozszerzenia Dariusza Wiśniewskiego
 
 Nieoficjalna wersja oparta na tagu upstream **v0.20.2**
 (`7c12f647150f8e7b2e07718f7993b1fcaa57fefe`).
 Nie zastępuje oryginalnego projektu ani jego autorstwa.
+
+Aktualne paczki: [PhotoCraft 0.20.2 DW 4](https://github.com/dariuszby-arch/photocraft/releases/tag/v0.20.2-dw4).
+Zawierają poprawkę pamięci PSD FIX3 oraz [poprawkę kompozytora GPU na Windows](GPU_FXC_FIX_PL.md).
 
 ## Rozszerzenia
 
@@ -26,13 +29,13 @@ info** celowo usuwa dane lokalizacji. Metadane nieobecne w źródle nie są odtw
 
 ## Linux x86_64
 
-Paczka AppImage jest przeznaczona dla systemów z glibc **2.36 lub nowszą**, w tym
+Paczka AppImage jest przeznaczona dla systemów z glibc **2.35 lub nowszą**, w tym
 MX Linux 23. Wymaga działającej sesji graficznej i obsługi OpenGL lub Vulkan.
 
 Nadaj AppImage prawo uruchamiania i uruchom go. Bez FUSE:
 
 ```sh
-APPIMAGE_EXTRACT_AND_RUN=1 ./PhotoCraft_0.20.2_DW_1_MX23-x86_64.AppImage
+APPIMAGE_EXTRACT_AND_RUN=1 ./PhotoCraft_0.20.2_DW_4_MX23-x86_64.AppImage
 ```
 
 W razie problemu ze sterownikiem można dodać `--safe-gpu`. Opcja `--cli`
