@@ -10,7 +10,7 @@ use crate::{Result, Session};
 
 const MAX_PRESETS: usize = 256;
 const MAX_PX: u32 = 300_000;
-const FORMATS: [&str; 6] = ["png", "jpg", "webp", "tif", "tga", "ico"];
+const FORMATS: [&str; 13] = ["png", "jpg", "jxl", "webp", "tif", "tga", "ico", "psd", "avif", "exr", "hdr", "dng", "original"];
 
 /// Export As › Image Size › Resample, in Photoshop's order: the `image.imageSize` method each
 /// choice sends, and its menu label. The first one is the default.
@@ -42,6 +42,8 @@ fn default_resample() -> String {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportPresetSettings {
+    #[serde(default)]
+    pub advanced: crate::export_panel::AdvancedExport,
     pub format: String,
     pub quality: u8,
     pub lossless: bool,
@@ -67,6 +69,7 @@ pub struct ExportPresetSettings {
 
 impl ExportPresetSettings {
     fn validate(&self) -> std::result::Result<(), String> {
+        self.advanced.validate()?;
         if !FORMATS.contains(&self.format.as_str()) {
             return Err(format!("format must be one of {}", FORMATS.join(", ")));
         }
@@ -82,11 +85,11 @@ impl ExportPresetSettings {
         if self.sizing == "pixels" && (!(1..=MAX_PX).contains(&self.width) || !(1..=MAX_PX).contains(&self.height)) {
             return Err(format!("width and height must be within 1..={MAX_PX} pixels"));
         }
-        if !matches!(self.metadata.as_str(), "none" | "exif" | "all") {
+        if !matches!(self.metadata.as_str(), "none" | "exif" | "all" | "noCamera" | "copyright") {
             return Err("metadata must be none, exif or all".into());
         }
-        if !matches!(self.profile.as_str(), "document" | "srgb") {
-            return Err("profile must be document or srgb".into());
+        if !matches!(self.profile.as_str(), "document" | "srgb" | "p3" | "adobergb" | "prophoto" | "rec2020") {
+            return Err("profile must be document, srgb, p3, adobergb, prophoto or rec2020".into());
         }
         if !matches!(self.tga_bits.as_str(), "auto" | "24" | "32") {
             return Err("tgaBits must be auto, 24 or 32".into());
@@ -228,7 +231,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Save Export Preset",
             menu: &[],
             shortcut: None,
-            params: r#"{"name":str,"settings":{"format":"png|jpg|webp|tif|tga|ico","quality":1..100,"lossless":bool,"transparency":bool,"scale":1..1000,"width":px,"height":px,"lockAspect":bool,"sizing":"scale|pixels","metadata":"none|exif|all","profile":"document|srgb","embedProfile":bool,"tgaBits":"auto|24|32","resample":"bicubicAutomatic|bicubic|bicubicSmoother|bicubicSharper|bilinear|nearest"="bicubicAutomatic"}} (a saved name is replaced)"#,
+            params: r#"{"name":str,"settings":{"format":"png|jpg|jxl|webp|tif|tga|ico|psd|avif|exr|hdr|dng|original","quality":1..100,"lossless":bool,"transparency":bool,"scale":1..1000,"width":px,"height":px,"lockAspect":bool,"sizing":"scale|pixels","metadata":"none|exif|all|noCamera|copyright","profile":"document|srgb|p3|adobergb|prophoto|rec2020","embedProfile":bool,"tgaBits":"auto|24|32","resample":"bicubicAutomatic|bicubic|bicubicSmoother|bicubicSharper|bilinear|nearest"="bicubicAutomatic"}} (optional advanced object: resize, file-size limit, HDR, DPI, sharpening, watermark, metadata redaction and destination settings; a saved name is replaced)"#,
             enabled: always,
             run: save,
             journal: false,
@@ -308,7 +311,7 @@ mod tests {
         assert!(s.execute("file.export.presets.save", json!({"name": "x", "settings": {"format": "bmp"}})).is_err());
         assert!(s.execute("file.export.presets.save", json!({"name": "x", "settings": {"sizing": "pixels", "width": 0, "height": 10}})).is_err());
         assert!(s.execute("file.export.presets.save", json!({"name": "x", "settings": {"scale": 0}})).is_err());
-        assert!(s.execute("file.export.presets.save", json!({"name": "x", "settings": {"metadata": "copyright"}})).is_err());
+        assert!(s.execute("file.export.presets.save", json!({"name": "x", "settings": {"metadata": "unsupported"}})).is_err());
         assert!(s.execute("file.export.presets.save", json!({"name": "x", "settings": {"profile": "fogra39"}})).is_err());
         let err = s.execute("file.export.presets.save", json!({"name": "x", "settings": {"resample": "lanczos"}})).unwrap_err().to_string();
         assert!(err.contains("resample must be one of"), "{err}");

@@ -245,12 +245,16 @@ pub fn fidelity_warnings_with(image: &Image, format: Format, opts: &EncodeOption
     // Compression
     if format == Format::Gif {
         w.push(W::PaletteQuantized);
-    } else if c.lossy || (format == Format::WebP && !opts.webp_lossless) || (format == Format::Dds && opts.dds.compression.is_block()) {
+    } else if c.lossy
+        || (format == Format::Jxl && !opts.jxl.lossless)
+        || (format == Format::WebP && !opts.webp_lossless)
+        || (format == Format::Dds && opts.dds.compression.is_block())
+    {
         w.push(W::LossyCompression);
     }
 
     // Metadata
-    if image.icc.is_some() && opts.embed_icc && (!c.icc || !sl.same_model(p.layout)) {
+    if image.icc.is_some() && opts.embed_icc && (!c.icc || !sl.same_model(p.layout) || (format == Format::Jxl && !opts.jxl.lossless)) {
         w.push(W::IccDropped);
     }
     if opts.embed_metadata {
@@ -269,7 +273,7 @@ pub fn fidelity_warnings_with(image: &Image, format: Format, opts: &EncodeOption
                 w.push(W::MetadataTooLarge { what: "XMP", bytes: xmp.len() });
             }
         }
-        if m.dpi.is_some() && (!c.dpi || (format == Format::WebP && !crate::codecs::webp::keeps_dpi(image))) {
+        if m.dpi.is_some() && (!c.dpi || (matches!(format, Format::WebP | Format::Jxl) && !crate::codecs::webp::keeps_dpi(image))) {
             w.push(W::DpiDropped);
         }
         // DPX keeps its own header fields, not free-form text.

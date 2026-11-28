@@ -8,17 +8,26 @@ use crate::{Result, args::ExportArgs};
 impl From<&ExportArgs> for ExportOptions {
     fn from(a: &ExportArgs) -> Self {
         // TIFF output is flat unless asked: scripted conversions keep predictable sizes.
-        let mut o = ExportOptions { tiff_layers: a.tiff_layers, tga_bits: a.tga_bits, ..Default::default() };
+        let mut o = ExportOptions {
+            tiff_layers: a.tiff_layers,
+            tiff_transparency: a.tiff_transparency,
+            tga_bits: a.tga_bits,
+            pcraft_full_composite: a.pcraft_full_composite,
+            ..Default::default()
+        };
         if let Some(q) = a.quality {
             o.encode.jpeg_quality = q;
             // Asking for a quality asks for a lossy WebP; the default WebP stays lossless.
             o.encode.webp_quality = q;
             o.encode.webp_lossless = false;
+            o.encode.jxl.quality = q;
+            o.encode.jxl.lossless = false;
         }
         o.encode.dpx_bits = a.dpx_bits;
         if let Some(c) = a.tiff_compression {
             o.encode.tiff_compression = c;
         }
+        o.encode.tiff_pyramid = a.tiff_pyramid;
         if let Some(f) = a.jpeg_format {
             o.encode.jpeg_format = f;
         }
@@ -33,6 +42,14 @@ impl From<&ExportArgs> for ExportOptions {
 pub(crate) fn warn_all(err: &mut dyn Write, ws: &[String]) {
     for w in ws {
         let _ = writeln!(err, "warning: {w}");
+    }
+}
+
+pub(crate) fn warn_dedup(err: &mut dyn Write, ws: &[String], seen: &mut std::collections::HashSet<String>) {
+    for w in ws {
+        if seen.insert(w.clone()) {
+            let _ = writeln!(err, "warning: {w}");
+        }
     }
 }
 
